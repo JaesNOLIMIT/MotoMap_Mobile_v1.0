@@ -15,35 +15,71 @@ class MotoMapApp extends StatelessWidget {
     return MaterialApp(
       title: 'MotoMap',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: MotoMapColors.background,
-        fontFamily: 'Manrope',
-        colorScheme: ColorScheme.dark(
-          surface: MotoMapColors.surface,
-          primary: MotoMapColors.primary,
-          onPrimary: MotoMapColors.onPrimary,
-          primaryContainer: MotoMapColors.primaryContainer,
-          onPrimaryContainer: MotoMapColors.onPrimaryContainer,
-          error: MotoMapColors.error,
+      themeMode: ThemeMode.dark,
+      theme: _theme,
+      darkTheme: _theme,
+      home: const SplashScreen(),
+    );
+  }
+
+  ThemeData get _theme {
+    final scheme = ColorScheme.dark(
+      surface: MotoMapColors.surface,
+      primary: MotoMapColors.primary,
+      onPrimary: MotoMapColors.onPrimary,
+      primaryContainer: MotoMapColors.primaryContainer,
+      onPrimaryContainer: MotoMapColors.onPrimaryContainer,
+      secondary: MotoMapColors.secondary,
+      onSecondary: MotoMapColors.onSecondary,
+      error: MotoMapColors.error,
+      outline: MotoMapColors.outlineVariant,
+    );
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: MotoMapColors.background,
+      colorScheme: scheme,
+      splashFactory: InkSparkle.splashFactory,
+      dividerColor: MotoMapColors.outlineVariant,
+      textTheme: const TextTheme(
+        headlineLarge: MotoMapText.headlineLg,
+        headlineMedium: MotoMapText.headlineMd,
+        titleLarge: MotoMapText.title,
+        bodyLarge: MotoMapText.bodyLg,
+        bodyMedium: MotoMapText.bodyMd,
+        labelSmall: MotoMapText.labelCaps,
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: MotoMapColors.background,
+        foregroundColor: MotoMapColors.onSurface,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: false,
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: MotoMapColors.surfaceContainer,
+        hintStyle: const TextStyle(color: MotoMapColors.onSurfaceVariant),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: MotoMapColors.outlineVariant),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: MotoMapColors.outlineVariant),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: MotoMapColors.primary),
         ),
       ),
-      // App always opens on the splash screen; it navigates itself to
-      // LoginScreen after its ~2s animation finishes.
-      home: const SplashScreen(),
-
-      // If you use a deep-link package (app_links / uni_links / go_router)
-      // to catch the "reset password" email link, push ResetPasswordScreen
-      // from that handler instead of a named route, e.g.:
-      //
-      // final uri = Uri.parse(incomingLink);
-      // if (uri.path == '/reset-password') {
-      //   navigatorKey.currentState?.push(MaterialPageRoute(
-      //     builder: (_) => ResetPasswordScreen(
-      //       resetToken: uri.queryParameters['token'],
-      //     ),
-      //   ));
-      // }
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: MotoMapColors.surfaceContainerHighest,
+        contentTextStyle: MotoMapText.bodyMd,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
     );
   }
 }

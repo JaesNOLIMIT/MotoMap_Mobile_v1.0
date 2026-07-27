@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/create_account_sheet.dart';
 import '../widgets/forgot_password_sheet.dart';
+import 'main_shell.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -86,7 +87,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   width: double.infinity,
                   height: 48,
                   child: ElevatedButton(
-                    onPressed: () {},
+                    onPressed: () {
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(builder: (_) => const MainShell()),
+                      );
+                    },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: MotoMapColors.primaryContainer,
                       foregroundColor: MotoMapColors.onPrimaryContainer,

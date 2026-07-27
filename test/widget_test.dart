@@ -48,4 +48,46 @@ void main() {
     await tester.pump();
     expect(find.byIcon(Icons.visibility_outlined), findsOneWidget);
   });
+
+  testWidgets('signs in and navigates between the main destinations', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await pumpAppToLogin(tester);
+    await tester.tap(find.text('Sign In'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Following'), findsOneWidget);
+    expect(find.text('Fresh rides from your people'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Discover').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Find the road—and people—you haven’t met yet.'),
+      findsOneWidget,
+    );
+    expect(find.text('Explore your way'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Plan').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Plan a ride'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Rides').last);
+    await tester.pumpAndSettle();
+    expect(find.text('My rides'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(find.text('Profile').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Alex Rider'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
