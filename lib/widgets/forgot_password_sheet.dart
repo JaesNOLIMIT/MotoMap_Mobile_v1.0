@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/auth_service.dart';
 import '../theme/motomap_colors.dart';
 
 /// Call this from the "Forgot password?" link on the login screen:
@@ -44,16 +46,23 @@ class _ForgotPasswordSheetState extends State<ForgotPasswordSheet> {
     if (!valid) return;
 
     setState(() => _submitting = true);
-
-    // TODO: wire this up to your auth service, e.g.:
-    // await authService.sendPasswordResetEmail(_emailCtrl.text.trim());
-    await Future.delayed(const Duration(seconds: 1));
-
-    if (!mounted) return;
-    setState(() {
-      _submitting = false;
-      _linkSent = true;
-    });
+    try {
+      await AuthService.instance.sendPasswordReset(_emailCtrl.text);
+      if (!mounted) return;
+      setState(() => _linkSent = true);
+    } on AuthException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not send the reset email.')),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override

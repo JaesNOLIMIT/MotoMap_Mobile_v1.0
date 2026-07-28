@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../models/legal_document.dart';
+import '../services/auth_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
+import '../widgets/legal_documents_sheet.dart';
 import 'garage_flow.dart';
-import 'login_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -145,9 +147,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _SettingsRow(
                       icon: Icons.lock_outline_rounded,
                       title: 'Privacy & security',
-                      detail: 'Profile visibility, blocked riders',
-                      onTap: () =>
-                          showAppMessage(context, 'Privacy and security'),
+                      detail: 'EULA, Terms, and Privacy Policy',
+                      onTap: () => showLegalDocumentsSheet(
+                        context,
+                        initialType: LegalDocumentType.privacy,
+                      ),
                     ),
                     const Divider(height: 1, indent: 56),
                     _SettingsRow(
@@ -206,10 +210,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(context).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-              (_) => false,
-            ),
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              try {
+                await AuthService.instance.signOut();
+              } catch (_) {
+                if (context.mounted) {
+                  showAppMessage(context, 'Could not sign out. Try again.');
+                }
+              }
+            },
             child: const Text('Sign out'),
           ),
         ],

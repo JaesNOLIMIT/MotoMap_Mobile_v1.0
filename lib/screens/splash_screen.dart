@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../theme/motomap_colors.dart';
-import 'login_screen.dart';
+import 'auth_gate.dart';
 
 /// Shown once when the app launches. Plays a ~2 second logo animation, then
-/// replaces itself with [LoginScreen] (swap the target in [_goNext] for your
-/// own auth check, e.g. push DashboardScreen if a session already exists).
+/// replaces itself with [AuthGate], which restores an existing Supabase
+/// session or shows the sign-in screen.
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -86,7 +86,7 @@ class _SplashScreenState extends State<SplashScreen>
       PageRouteBuilder(
         transitionDuration: const Duration(milliseconds: 400),
         pageBuilder: (_, animation, __) =>
-            FadeTransition(opacity: animation, child: const LoginScreen()),
+            FadeTransition(opacity: animation, child: const AuthGate()),
       ),
     );
   }

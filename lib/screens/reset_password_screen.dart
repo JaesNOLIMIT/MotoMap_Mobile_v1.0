@@ -1,24 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/auth_service.dart';
 import '../theme/motomap_colors.dart';
-import 'login_screen.dart';
+import '../widgets/password_requirements.dart';
 
-/// The screen a user lands on after tapping the "reset password" link in
-/// their email. Wire your deep-link handler (e.g. app_links, uni_links, or
-/// go_router) to push this screen and pass along the token from the link, e.g.:
-///
-/// ```dart
-/// // motomap://reset-password?token=abc123
-/// Navigator.of(context).push(MaterialPageRoute(
-///   builder: (_) => ResetPasswordScreen(resetToken: uri.queryParameters['token']),
-/// ));
-/// ```
 class ResetPasswordScreen extends StatefulWidget {
-  const ResetPasswordScreen({super.key, this.resetToken});
-
-  /// Token parsed from the deep link. Send this along with the new password
-  /// to your backend so it knows which account/request this reset belongs to.
-  final String? resetToken;
+  const ResetPasswordScreen({super.key});
 
   @override
   State<ResetPasswordScreen> createState() => _ResetPasswordScreenState();
@@ -34,10 +22,21 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
   bool _success = false;
 
   @override
+  void initState() {
+    super.initState();
+    _passwordCtrl.addListener(_refreshRequirements);
+  }
+
+  @override
   void dispose() {
+    _passwordCtrl.removeListener(_refreshRequirements);
     _passwordCtrl.dispose();
     _confirmPasswordCtrl.dispose();
     super.dispose();
+  }
+
+  void _refreshRequirements() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _handleResetPassword() async {
@@ -45,26 +44,22 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
     if (!valid) return;
 
     setState(() => _submitting = true);
-
-    // TODO: wire this up to your auth service, e.g.:
-    // await authService.resetPassword(
-    //   token: widget.resetToken,
-    //   newPassword: _passwordCtrl.text,
-    // );
-    await Future.delayed(const Duration(seconds: 1));
-
-    if (!mounted) return;
-    setState(() {
-      _submitting = false;
-      _success = true;
-    });
+    try {
+      await AuthService.instance.updatePassword(_passwordCtrl.text);
+      if (!mounted) return;
+      setState(() => _success = true);
+    } on AuthException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.message)));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
-  void _goToLogin() {
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
-      (route) => false,
-    );
+  Future<void> _goToLogin() async {
+    await AuthService.instance.signOut();
   }
 
   @override
@@ -127,22 +122,16 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
             onToggle: () =>
                 setState(() => _obscurePassword = !_obscurePassword),
             validator: (v) {
-              if (v == null || v.length < 8) {
-                return 'Password must be at least 8 characters';
+              if (!PasswordRules.isValid(v ?? '')) {
+                return 'Password does not meet every requirement';
               }
               return null;
             },
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerLeft,
-            child: Text(
-              'Use at least 8 characters.',
-              style: MotoMapText.bodyMd.copyWith(
-                fontSize: 13,
-                color: MotoMapColors.onSurfaceVariant.withValues(alpha: 0.75),
-              ),
-            ),
+            child: PasswordRequirements(password: _passwordCtrl.text),
           ),
           const SizedBox(height: 20),
 
