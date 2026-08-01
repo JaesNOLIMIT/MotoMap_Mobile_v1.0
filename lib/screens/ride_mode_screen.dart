@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../models/diagnostic_data.dart';
+import '../services/elm327_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
 
@@ -23,7 +27,33 @@ class _RideModeScreenState extends State<RideModeScreen> {
   bool muted = false;
 
   @override
+  void initState() {
+    super.initState();
+    Elm327Service.instance.addListener(_elmChanged);
+    unawaited(
+      Elm327Service.instance.startLiveMonitoring(
+        type: DiagnosticSessionType.ride,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    Elm327Service.instance.removeListener(_elmChanged);
+    unawaited(Elm327Service.instance.stopLiveMonitoring());
+    super.dispose();
+  }
+
+  void _elmChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final elm = Elm327Service.instance;
+    final liveSnapshot = elm.isConnected && elm.ecuAvailable
+        ? elm.latestSnapshot
+        : null;
     return Scaffold(
       backgroundColor: MotoMapColors.background,
       body: Center(
@@ -106,6 +136,8 @@ class _RideModeScreenState extends State<RideModeScreen> {
                           ),
                         ],
                       ),
+                      const SizedBox(height: 8),
+                      _ElmRideStatus(service: Elm327Service.instance),
                       const Spacer(),
                       Align(
                         alignment: Alignment.centerRight,
@@ -185,21 +217,38 @@ class _RideModeScreenState extends State<RideModeScreen> {
                             const Divider(height: 24),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceAround,
-                              children: const [
+                              children: [
                                 _RideStat(
                                   label: 'SPEED',
-                                  value: '60',
-                                  unit: 'km/h',
+                                  value:
+                                      liveSnapshot?.vehicleSpeedKph
+                                          ?.toStringAsFixed(0) ??
+                                      'N/A',
+                                  unit: liveSnapshot?.vehicleSpeedKph == null
+                                      ? ''
+                                      : 'km/h',
                                 ),
                                 _RideStat(
-                                  label: 'RIDDEN',
-                                  value: '15',
-                                  unit: 'km',
+                                  label: 'RPM',
+                                  value:
+                                      liveSnapshot?.engineRpm?.toStringAsFixed(
+                                        0,
+                                      ) ??
+                                      'N/A',
+                                  unit: liveSnapshot?.engineRpm == null
+                                      ? ''
+                                      : 'rpm',
                                 ),
                                 _RideStat(
-                                  label: 'ETA',
-                                  value: '8:42',
-                                  unit: 'AM',
+                                  label: 'ENGINE',
+                                  value:
+                                      liveSnapshot?.coolantTemperatureC
+                                          ?.toStringAsFixed(0) ??
+                                      'N/A',
+                                  unit:
+                                      liveSnapshot?.coolantTemperatureC == null
+                                      ? ''
+                                      : '°C',
                                 ),
                               ],
                             ),
@@ -273,6 +322,54 @@ class _RideModeScreenState extends State<RideModeScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ElmRideStatus extends StatelessWidget {
+  const _ElmRideStatus({required this.service});
+
+  final Elm327Service service;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasCodes = service.latestTroubleCodes.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      decoration: BoxDecoration(
+        color: (hasCodes ? MotoMapColors.error : MotoMapColors.background)
+            .withValues(alpha: 0.9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: hasCodes
+              ? MotoMapColors.error.withValues(alpha: 0.6)
+              : MotoMapColors.outlineVariant,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            hasCodes
+                ? Icons.warning_amber_rounded
+                : service.isConnected
+                ? Icons.bluetooth_connected_rounded
+                : Icons.bluetooth_disabled_rounded,
+            size: 18,
+            color: hasCodes ? MotoMapColors.error : MotoMapColors.primary,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              hasCodes
+                  ? '${service.latestTroubleCodes.length} ECU fault code(s): ${service.latestTroubleCodes.map((code) => code.code).join(', ')}'
+                  : service.statusLabel,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
       ),
     );
   }

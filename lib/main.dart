@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config/supabase_config.dart';
 import 'screens/splash_screen.dart';
 import 'theme/motomap_colors.dart';
+import 'widgets/elm_connection_notification.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,6 +28,9 @@ class MotoMapApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       theme: _theme,
       darkTheme: _theme,
+      builder: (context, child) => ElmConnectionNotificationHost(
+        child: child ?? const SizedBox.shrink(),
+      ),
       home: const SplashScreen(),
     );
   }

@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../services/elm327_service.dart';
+import '../services/motorcycle_service.dart';
 import '../theme/motomap_colors.dart';
 import 'discover_screen.dart';
 import 'home_screen.dart';
@@ -26,6 +30,23 @@ class _MainShellState extends State<MainShell> {
     (Icons.two_wheeler_outlined, Icons.two_wheeler_rounded, 'Rides'),
     (Icons.person_outline_rounded, Icons.person_rounded, 'Profile'),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    MotorcycleService.instance.changes.addListener(_motorcyclesChanged);
+    unawaited(Elm327Service.instance.initialize());
+  }
+
+  @override
+  void dispose() {
+    MotorcycleService.instance.changes.removeListener(_motorcyclesChanged);
+    super.dispose();
+  }
+
+  void _motorcyclesChanged() {
+    unawaited(Elm327Service.instance.refreshReconnectMotorcycle());
+  }
 
   @override
   Widget build(BuildContext context) {

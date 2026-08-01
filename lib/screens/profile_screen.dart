@@ -1,5 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
+import '../models/motorcycle.dart';
+import '../models/rider_profile.dart';
+import '../services/motorcycle_service.dart';
+import '../services/image_storage_service.dart';
+import '../services/profile_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
 import 'route_detail_screen.dart';
@@ -29,34 +35,13 @@ class ProfileScreen extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 26),
-          const Center(
-            child: RiderAvatar(
-              initials: 'AR',
-              size: 92,
-              color: Color(0xFF54463D),
-              verified: true,
-            ),
-          ),
+          const _ProfileAvatar(),
           const SizedBox(height: 15),
-          Center(child: Text('Alex Rider', style: MotoMapText.headlineMd)),
+          const _ProfileName(),
           const SizedBox(height: 4),
-          const Center(
-            child: Text(
-              '@alexrides · Quezon City',
-              style: TextStyle(
-                color: MotoMapColors.onSurfaceVariant,
-                fontSize: 11,
-              ),
-            ),
-          ),
+          const _ProfileUsername(),
           const SizedBox(height: 12),
-          const Center(
-            child: AppPill(
-              label: 'BMW R1250GS',
-              icon: Icons.two_wheeler_rounded,
-              compact: true,
-            ),
-          ),
+          const _PrimaryMotorcyclePill(),
           const SizedBox(height: 17),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -181,6 +166,160 @@ class ProfileScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ProfileAvatar extends StatefulWidget {
+  const _ProfileAvatar();
+
+  @override
+  State<_ProfileAvatar> createState() => _ProfileAvatarState();
+}
+
+class _ProfileAvatarState extends State<_ProfileAvatar> {
+  late Future<RiderProfile> _profile;
+  bool _uploading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _profile = ProfileService.instance.fetchCurrentProfile();
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<RiderProfile>(
+    future: _profile,
+    builder: (context, snapshot) {
+      final profile = snapshot.data;
+      final imageUrl = ImageStorageService.instance.publicUrl(
+        ImageStorageService.profileBucket,
+        profile?.avatarPath,
+      );
+      return Center(
+        child: GestureDetector(
+          onTap: profile == null || _uploading ? null : () => _pick(profile),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              if (imageUrl.isEmpty)
+                RiderAvatar(
+                  initials: profile?.initials ?? 'R',
+                  size: 92,
+                  color: const Color(0xFF54463D),
+                  verified: true,
+                )
+              else
+                CircleAvatar(
+                  radius: 46,
+                  backgroundColor: MotoMapColors.surfaceContainer,
+                  backgroundImage: NetworkImage(imageUrl),
+                ),
+              Positioned(
+                right: -2,
+                bottom: -2,
+                child: Container(
+                  width: 30,
+                  height: 30,
+                  decoration: const BoxDecoration(
+                    color: MotoMapColors.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: _uploading
+                      ? const Padding(
+                          padding: EdgeInsets.all(8),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: MotoMapColors.onPrimary,
+                          ),
+                        )
+                      : const Icon(
+                          Icons.add_a_photo_outlined,
+                          size: 16,
+                          color: MotoMapColors.onPrimary,
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
+  Future<void> _pick(RiderProfile profile) async {
+    final file = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1200,
+      maxHeight: 1200,
+      imageQuality: 85,
+      requestFullMetadata: false,
+    );
+    if (file == null || !mounted) return;
+    setState(() => _uploading = true);
+    try {
+      await ImageStorageService.instance.uploadProfileImage(
+        profile: profile,
+        file: file,
+      );
+      if (!mounted) return;
+      setState(() => _profile = ProfileService.instance.fetchCurrentProfile());
+    } catch (error) {
+      if (mounted) showAppMessage(context, 'Photo upload failed: $error');
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+}
+
+class _ProfileName extends StatelessWidget {
+  const _ProfileName();
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<RiderProfile>(
+    future: ProfileService.instance.fetchCurrentProfile(),
+    builder: (context, snapshot) => Center(
+      child: Text(
+        snapshot.data?.displayName ??
+            (snapshot.hasError
+                ? 'Rider profile unavailable'
+                : 'Loading rider…'),
+        style: MotoMapText.headlineMd,
+      ),
+    ),
+  );
+}
+
+class _ProfileUsername extends StatelessWidget {
+  const _ProfileUsername();
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<RiderProfile>(
+    future: ProfileService.instance.fetchCurrentProfile(),
+    builder: (context, snapshot) => Center(
+      child: Text(
+        snapshot.data == null ? ' ' : '@${snapshot.data!.username}',
+        style: const TextStyle(
+          color: MotoMapColors.onSurfaceVariant,
+          fontSize: 11,
+        ),
+      ),
+    ),
+  );
+}
+
+class _PrimaryMotorcyclePill extends StatelessWidget {
+  const _PrimaryMotorcyclePill();
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Motorcycle?>(
+    future: MotorcycleService.instance.fetchPrimaryMotorcycle(),
+    builder: (context, snapshot) => Center(
+      child: AppPill(
+        label: snapshot.data?.displayName ?? 'ADD A MOTORCYCLE',
+        icon: Icons.two_wheeler_rounded,
+        compact: true,
+      ),
+    ),
+  );
 }
 
 class _ProfileStat extends StatelessWidget {

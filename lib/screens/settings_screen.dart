@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/legal_document.dart';
 import '../services/auth_service.dart';
+import '../services/elm327_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
 import '../widgets/legal_documents_sheet.dart';
@@ -20,7 +21,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool emergencySharing = true;
 
   @override
+  void initState() {
+    super.initState();
+    Elm327Service.instance.addListener(_elmChanged);
+  }
+
+  @override
+  void dispose() {
+    Elm327Service.instance.removeListener(_elmChanged);
+    super.dispose();
+  }
+
+  void _elmChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final elm = Elm327Service.instance;
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560),
@@ -112,10 +130,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: Column(
                   children: [
                     _SettingsRow(
-                      icon: Icons.bluetooth_connected_rounded,
-                      title: 'BMW R1250GS',
-                      detail: 'Connected · 65% fuel',
-                      iconColor: MotoMapColors.success,
+                      icon: elm.isConnected
+                          ? Icons.bluetooth_connected_rounded
+                          : Icons.bluetooth_disabled_rounded,
+                      title: 'Primary motorcycle',
+                      detail: elm.motorcycle == null
+                          ? 'N/A · No primary motorcycle selected'
+                          : '${elm.motorcycle!.displayName} · ${elm.statusLabel}',
+                      iconColor: elm.isConnected
+                          ? MotoMapColors.success
+                          : MotoMapColors.warning,
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute(
                           builder: (_) => const MotorcycleDetailScreen(),
@@ -126,7 +150,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     _SettingsRow(
                       icon: Icons.monitor_heart_outlined,
                       title: 'System diagnostics',
-                      detail: 'All systems normal',
+                      detail: elm.isConnected && elm.ecuAvailable
+                          ? 'Live ECU data is available'
+                          : 'N/A · No live ECU data',
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute(
                           builder: (_) => const SystemDiagnosticsScreen(),

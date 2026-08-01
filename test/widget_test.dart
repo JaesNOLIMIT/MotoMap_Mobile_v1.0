@@ -133,7 +133,7 @@ void main() {
 
     await tester.tap(find.text('Profile').last);
     await tester.pumpAndSettle();
-    expect(find.text('Alex Rider'), findsOneWidget);
+    expect(find.text('Rider profile unavailable'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }
