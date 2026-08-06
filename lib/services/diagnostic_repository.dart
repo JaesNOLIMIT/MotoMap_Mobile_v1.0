@@ -148,6 +148,11 @@ class DiagnosticRepository {
       recordedRideCount: (row['recorded_ride_count'] as num?)?.toInt() ?? 0,
       totalDistanceKm: _asDouble(row['total_distance_km']),
       totalFuelConsumedLiters: _asDouble(row['total_fuel_consumed_liters']),
+      estimatedFuelConsumedLiters: _asDouble(
+        row['estimated_fuel_consumed_liters'],
+      ),
+      ridesWithEstimatedFuel:
+          (row['rides_with_estimated_fuel'] as num?)?.toInt() ?? 0,
     );
   }
 

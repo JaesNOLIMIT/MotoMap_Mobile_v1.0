@@ -278,11 +278,15 @@ class MotorcycleUsageSummary {
     required this.recordedRideCount,
     required this.totalDistanceKm,
     required this.totalFuelConsumedLiters,
+    this.estimatedFuelConsumedLiters,
+    this.ridesWithEstimatedFuel = 0,
   });
 
   final int recordedRideCount;
   final double? totalDistanceKm;
   final double? totalFuelConsumedLiters;
+  final double? estimatedFuelConsumedLiters;
+  final int ridesWithEstimatedFuel;
 
   factory MotorcycleUsageSummary.fromHistory(
     List<DiagnosticHistoryEntry> history,

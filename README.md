@@ -86,6 +86,12 @@ Doing so attempts to create the same tables again and causes errors such as
 `relation "motorcycles" already exists`. Use `migration list` to verify the
 local and remote migration versions instead.
 
+`20260803192619_create_route_plans_and_gps_rides.sql` adds user-owned route
+plans, GPS rides, ordered ride points, pause intervals, real/estimated fuel
+labels, route and health scores, and an updated motorcycle usage summary. The
+migration is applied to the linked Moto Map project. All four new tables have
+RLS enabled with owner-scoped select, insert, update, and delete policies.
+
 ## Motorcycle catalog and real ride history
 
 The add-motorcycle form can search the official NHTSA vPIC JSON API for
@@ -98,3 +104,36 @@ samples. Distance is calculated from real ECU speed samples. Fuel consumed is
 calculated only when the ECU supports OBD Mode 01 PID `5E` (engine fuel rate);
 unsupported and missing values display as `N/A`. The motorcycle detail screen
 shows lifetime recorded-ride totals and tappable ride/diagnostic history.
+
+## Real maps, navigation, and ride recording
+
+MotoMap now uses MapLibre with the OpenFreeMap Liberty vector style, user-
+submitted Nominatim destination searches, and Valhalla motorcycle routing.
+These components use OpenStreetMap road data and are open source/self-hostable.
+The default public endpoints require no API key, but do not provide a commercial
+SLA. Override them without changing source code by supplying these build-time
+values:
+
+```powershell
+flutter run `
+  --dart-define=MOTOMAP_MAP_STYLE_URL=https://your-map-style `
+  --dart-define=MOTOMAP_GEOCODER_URL=https://your-nominatim `
+  --dart-define=MOTOMAP_ROUTER_URL=https://your-valhalla
+```
+
+The smart prompt planner is deterministic and free: it extracts destination,
+loop distance, duration, and road style, then asks Valhalla for a real route. It
+does not claim to be a generative AI model and requires no paid AI key.
+
+Ride recording starts only after the rider presses **Start ride**. It records
+precise GPS points, elapsed time, moving time, manual pause intervals, route
+progress, available ELM327 readings, and turn-by-turn voice guidance. Reaching
+the routed endpoint after sufficient route progress ends and saves the ride
+automatically; the rider can also pause, continue, or end manually. GPS points
+are batched, and failed uploads are kept locally for retry when connectivity
+returns. Force-quitting an app stops operating-system background execution.
+
+Android MapLibre builds require Java 21 and NDK `28.1.13356709`. This workspace
+uses the portable JDK at `C:\Adrian\Tools\temurin-jdk21\jdk-21.0.12+8`; Gradle
+installed the required side-by-side NDK automatically. Android and iOS riders
+must grant precise/background location permission for locked-screen recording.

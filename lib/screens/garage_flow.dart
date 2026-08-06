@@ -547,6 +547,17 @@ class _StoredMotorcycleData extends StatelessWidget {
             ],
           ),
         ),
+        if (usage.ridesWithEstimatedFuel > 0) ...[
+          const SizedBox(height: 7),
+          Text(
+            '${usage.ridesWithEstimatedFuel} ride(s) include an explicitly labeled fuel estimate because real ECU fuel-rate data was unavailable.',
+            style: const TextStyle(
+              color: MotoMapColors.warning,
+              fontSize: 9,
+              height: 1.35,
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
         _MotorcycleDataTabs(selected: selectedTab, onSelected: onTabSelected),
         const SizedBox(height: 16),

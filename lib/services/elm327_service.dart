@@ -82,6 +82,7 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
   Set<int> supportedPids = <int>{};
 
   Motorcycle? get motorcycle => _motorcycle;
+  String? get activeSessionId => _activeSessionId;
   bool get isConnected =>
       status == ElmConnectionStatus.connected && _transportIsConnected;
 
@@ -968,6 +969,9 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
     ).firstMatch(response);
     return match == null ? null : double.tryParse(match.group(1)!);
   }
+
+  (int, List<String>) evaluateCurrentHealth() =>
+      score(latestSnapshot, latestTroubleCodes);
 
   @visibleForTesting
   static (int, List<String>) score(

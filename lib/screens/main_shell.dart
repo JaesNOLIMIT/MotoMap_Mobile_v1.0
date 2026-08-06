@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../services/elm327_service.dart';
 import '../services/motorcycle_service.dart';
+import '../services/ride_repository.dart';
 import '../theme/motomap_colors.dart';
 import 'discover_screen.dart';
 import 'home_screen.dart';
@@ -36,6 +37,7 @@ class _MainShellState extends State<MainShell> {
     super.initState();
     MotorcycleService.instance.changes.addListener(_motorcyclesChanged);
     unawaited(Elm327Service.instance.initialize());
+    unawaited(RideRepository.instance.syncPending());
   }
 
   @override
