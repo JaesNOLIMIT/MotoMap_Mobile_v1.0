@@ -123,7 +123,7 @@ void main() {
 
     await tester.tap(find.text('Plan').last);
     await tester.pumpAndSettle();
-    expect(find.text('Plan a ride'), findsOneWidget);
+    expect(find.text('Plan your ride'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.tap(find.text('Rides').last);

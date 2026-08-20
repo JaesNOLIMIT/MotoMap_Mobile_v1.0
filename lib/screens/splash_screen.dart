@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/motomap_colors.dart';
+import '../widgets/app_ui.dart';
 import 'auth_gate.dart';
 
 /// Shown once when the app launches. Plays a ~2 second logo animation, then
@@ -112,19 +113,7 @@ class _SplashScreenState extends State<SplashScreen>
                   opacity: _logoOpacity,
                   child: ScaleTransition(
                     scale: _logoScale,
-                    child: Container(
-                      width: 84,
-                      height: 84,
-                      decoration: const BoxDecoration(
-                        color: MotoMapColors.primaryContainer,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.two_wheeler,
-                        size: 42,
-                        color: MotoMapColors.onPrimaryContainer,
-                      ),
-                    ),
+                    child: const MotoMapBrandIcon(size: 96, radius: 28),
                   ),
                 ),
                 const SizedBox(height: 20),

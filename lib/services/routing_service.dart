@@ -83,30 +83,129 @@ class RoutingService {
         .toList(growable: false);
   }
 
+  Future<PlaceResult> reverseGeocode(MapPoint point) async {
+    final uri = Uri.parse('${MapConfig.geocoderUrl}/reverse').replace(
+      queryParameters: {
+        'lat': point.latitude.toString(),
+        'lon': point.longitude.toString(),
+        'format': 'jsonv2',
+        'addressdetails': '1',
+        'zoom': '18',
+        'accept-language': 'en',
+      },
+    );
+    final response = await _client.get(
+      uri,
+      headers: {
+        if (!kIsWeb) 'User-Agent': MapConfig.userAgent,
+        'Accept': 'application/json',
+      },
+    );
+    if (response.statusCode != 200) {
+      throw StateError('Could not identify that map location.');
+    }
+    final row = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+    final display = row['display_name'] as String? ?? 'Pinned location';
+    final address = Map<String, dynamic>.from(row['address'] as Map? ?? {});
+    final name =
+        row['name'] as String? ??
+        address['amenity'] as String? ??
+        address['shop'] as String? ??
+        address['road'] as String? ??
+        display.split(',').first;
+    return PlaceResult(name: name, displayName: display, location: point);
+  }
+
   Future<GeneratedRoute> routeToDestination({
     required MapPoint origin,
     required MapPoint destination,
     required RoutePreference preference,
-  }) => _requestRoute(locations: [origin, destination], preference: preference);
+    List<RouteWaypoint> waypoints = const [],
+    bool avoidHighways = false,
+    bool avoidTolls = false,
+  }) => _requestRoute(
+    locations: [origin, ...waypoints.map((stop) => stop.location), destination],
+    preference: preference,
+    avoidHighways: avoidHighways,
+    avoidTolls: avoidTolls,
+  );
+
+  Future<List<RouteAlternative>> routeAlternatives({
+    required MapPoint origin,
+    required MapPoint destination,
+    required RoutePreference preference,
+    List<RouteWaypoint> waypoints = const [],
+    bool avoidHighways = false,
+    bool avoidTolls = false,
+  }) async {
+    final preferences = <RoutePreference>{
+      preference,
+      RoutePreference.fastest,
+      RoutePreference.scenic,
+      RoutePreference.curvy,
+    }.toList(growable: false);
+    final results = <RouteAlternative>[];
+    for (final candidatePreference in preferences) {
+      try {
+        final route = await routeToDestination(
+          origin: origin,
+          destination: destination,
+          preference: candidatePreference,
+          waypoints: waypoints,
+          avoidHighways: avoidHighways,
+          avoidTolls: avoidTolls,
+        );
+        final duplicate = results.any(
+          (item) =>
+              (item.route.distanceKm - route.distanceKm).abs() < 0.15 &&
+              (item.route.durationSeconds - route.durationSeconds).abs() < 45,
+        );
+        if (!duplicate) {
+          results.add(
+            RouteAlternative(
+              route: route,
+              preference: candidatePreference,
+              label: candidatePreference == preference
+                  ? 'Recommended'
+                  : candidatePreference.label,
+            ),
+          );
+        }
+        if (results.length == 3) break;
+      } catch (_) {
+        if (results.isEmpty && candidatePreference == preferences.last) {
+          rethrow;
+        }
+      }
+    }
+    return results;
+  }
 
   Future<GeneratedRoute> createLoop({
     required MapPoint origin,
     required double requestedDistanceKm,
     required RoutePreference preference,
+    double? headingDegrees,
+    bool avoidHighways = false,
+    bool avoidTolls = false,
   }) async {
     final distance = requestedDistanceKm.clamp(3, 5000).toDouble();
     final legRadiusKm = distance / (2 + math.sqrt(2));
-    final angle = switch (preference) {
-      RoutePreference.fastest => 20.0,
-      RoutePreference.balanced => 45.0,
-      RoutePreference.scenic => 80.0,
-      RoutePreference.curvy => 120.0,
-    };
+    final angle =
+        headingDegrees ??
+        switch (preference) {
+          RoutePreference.fastest => 20.0,
+          RoutePreference.balanced => 45.0,
+          RoutePreference.scenic => 80.0,
+          RoutePreference.curvy => 120.0,
+        };
     final first = _destinationPoint(origin, legRadiusKm, angle);
     final second = _destinationPoint(origin, legRadiusKm, angle + 90);
     return _requestRoute(
       locations: [origin, first, second, origin],
       preference: preference,
+      avoidHighways: avoidHighways,
+      avoidTolls: avoidTolls,
     );
   }
 
@@ -170,14 +269,19 @@ class RoutingService {
   Future<GeneratedRoute> _requestRoute({
     required List<MapPoint> locations,
     required RoutePreference preference,
+    bool avoidHighways = false,
+    bool avoidTolls = false,
   }) async {
+    final costing = _costingOptions(preference);
+    if (avoidHighways) costing['use_highways'] = 0;
+    if (avoidTolls) costing['use_tolls'] = 0;
     final body = {
       'locations': [
         for (final point in locations)
           {'lat': point.latitude, 'lon': point.longitude, 'type': 'break'},
       ],
       'costing': 'motorcycle',
-      'costing_options': {'motorcycle': _costingOptions(preference)},
+      'costing_options': {'motorcycle': costing},
       'units': 'kilometers',
       'language': 'en-US',
       'directions_options': {'units': 'kilometers'},

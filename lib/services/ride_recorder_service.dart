@@ -42,6 +42,7 @@ class RideRecorderService extends ChangeNotifier {
   bool fuelIsEstimated = false;
   bool voiceMuted = false;
   bool reachedDestination = false;
+  bool arrivalConfirmationPending = false;
   int ridingScore = 0;
   int? motorcycleHealthScore;
   Map<String, dynamic> scoreDetails = const {};
@@ -74,6 +75,7 @@ class RideRecorderService extends ChangeNotifier {
   int _offRouteSamples = 0;
   bool _rerouting = false;
   bool _finishInProgress = false;
+  bool _arrivalTriggered = false;
   final Set<String> _spokenPrompts = {};
 
   bool get isActive => switch (status) {
@@ -138,7 +140,13 @@ class RideRecorderService extends ChangeNotifier {
 
     try {
       await _ensureLocationReady();
+      final plannedBike = selectedPlan.motorcycleId == null
+          ? null
+          : await MotorcycleService.instance.fetchMotorcycle(
+              selectedPlan.motorcycleId!,
+            );
       final bike =
+          plannedBike ??
           Elm327Service.instance.motorcycle ??
           await MotorcycleService.instance.fetchReconnectMotorcycle();
       if (bike == null) {
@@ -166,7 +174,13 @@ class RideRecorderService extends ChangeNotifier {
         diagnosticSessionId: Elm327Service.instance.activeSessionId,
         start: currentLocation,
       );
-      await _configureVoice();
+      try {
+        await _configureVoice();
+      } catch (_) {
+        // Voice guidance is optional; GPS recording must still start when the
+        // platform TTS service is unavailable.
+        voiceMuted = true;
+      }
       _positionSubscription =
           Geolocator.getPositionStream(
             locationSettings: _backgroundLocationSettings(),
@@ -222,9 +236,61 @@ class RideRecorderService extends ChangeNotifier {
     unawaited(_speak('Ride resumed.'));
   }
 
+  Future<void> continueAfterArrival() async {
+    if (!arrivalConfirmationPending) return;
+    arrivalConfirmationPending = false;
+    reachedDestination = false;
+    notifyListeners();
+    await resume();
+  }
+
+  Future<void> confirmArrivalAndFinish() async {
+    if (!arrivalConfirmationPending) return;
+    arrivalConfirmationPending = false;
+    reachedDestination = true;
+    notifyListeners();
+    await finish(destinationReached: true);
+  }
+
+  Future<void> rerouteNow() async {
+    final location = currentLocation;
+    if (!isActive || location == null || plan == null || _rerouting) return;
+    await _reroute(location);
+  }
+
+  Future<void> addUnplannedStop(RouteWaypoint stop) async {
+    final location = currentLocation;
+    final activePlan = plan;
+    if (!isActive || location == null || activePlan == null || _rerouting) {
+      return;
+    }
+    _rerouting = true;
+    try {
+      final route = await RoutingService.instance.routeToDestination(
+        origin: location,
+        destination: activePlan.destination,
+        preference: activePlan.preference,
+        waypoints: [stop],
+        avoidHighways: activePlan.avoidHighways,
+        avoidTolls: activePlan.avoidTolls,
+      );
+      navigationCoordinates = route.coordinates;
+      navigationManeuvers = route.maneuvers;
+      _closestRouteIndex = 0;
+      _activeManeuverIndex = 0;
+      _spokenPrompts.clear();
+      _offRouteSamples = 0;
+      notifyListeners();
+      unawaited(_speak('${stop.name} added before the destination.'));
+    } finally {
+      _rerouting = false;
+    }
+  }
+
   Future<void> finish({bool destinationReached = false}) async {
     if (!isActive || ride == null || _finishInProgress) return;
     _finishInProgress = true;
+    arrivalConfirmationPending = false;
     status = RideRecorderStatus.finishing;
     notifyListeners();
     final endedAt = DateTime.now();
@@ -313,6 +379,7 @@ class RideRecorderService extends ChangeNotifier {
     motorcycle = null;
     ride = null;
     errorMessage = null;
+    arrivalConfirmationPending = false;
     notifyListeners();
   }
 
@@ -440,12 +507,24 @@ class RideRecorderService extends ChangeNotifier {
 
     final destinationDistance = _distanceMeters(location, plan!.destination);
     if (!_finishInProgress &&
+        !_arrivalTriggered &&
+        status == RideRecorderStatus.recording &&
         completionPercent >= 85 &&
         distanceKm >= 0.1 &&
         destinationDistance <= 80) {
-      reachedDestination = true;
-      unawaited(finish(destinationReached: true));
+      _arrivalTriggered = true;
+      unawaited(_pauseForArrivalConfirmation());
     }
+  }
+
+  Future<void> _pauseForArrivalConfirmation() async {
+    await pause();
+    reachedDestination = true;
+    arrivalConfirmationPending = true;
+    notifyListeners();
+    unawaited(
+      _speak('You reached the destination. Confirm finish or continue riding.'),
+    );
   }
 
   Future<void> _reroute(MapPoint location) async {
@@ -532,6 +611,8 @@ class RideRecorderService extends ChangeNotifier {
     fuelConsumedLiters = null;
     fuelIsEstimated = false;
     reachedDestination = false;
+    arrivalConfirmationPending = false;
+    _arrivalTriggered = false;
     ridingScore = 0;
     motorcycleHealthScore = null;
     scoreDetails = const {};
@@ -552,16 +633,10 @@ class RideRecorderService extends ChangeNotifier {
           'Precise location permission is required to record and navigate rides.',
         );
       }
-      if (!kIsWeb && permission == LocationPermission.whileInUse) {
-        permission = await Geolocator.requestPermission();
-        if (permission != LocationPermission.always) {
-          throw StateError(
-            'Set MotoMap Location permission to “Allow all the time” so an '
-            'active ride continues when the screen is locked. Open phone '
-            'Settings, update the permission, then press Start again.',
-          );
-        }
-      }
+      // Android normally offers "Allow all the time" only from App Settings,
+      // not in the first runtime dialog. A ride started while MotoMap is open
+      // can continue through the location foreground service with while-in-use
+      // access, so background permission is recommended but never blocks Start.
     } on MissingPluginException {
       throw StateError(
         'The location component was not loaded. Fully close MotoMap and install '

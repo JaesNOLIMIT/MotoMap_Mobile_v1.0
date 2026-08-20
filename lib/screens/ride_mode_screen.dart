@@ -4,16 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ride_data.dart';
+import '../models/shared_ride.dart';
 import '../services/elm327_service.dart';
 import '../services/ride_recorder_service.dart';
+import '../services/shared_ride_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
 import '../widgets/motomap_map.dart';
+import 'location_picker_screen.dart';
 
 class RideModeScreen extends StatefulWidget {
-  const RideModeScreen({required this.plan, super.key});
+  const RideModeScreen({required this.plan, this.sharedRide, super.key});
 
   final RoutePlan plan;
+  final SharedRide? sharedRide;
 
   @override
   State<RideModeScreen> createState() => _RideModeScreenState();
@@ -23,6 +27,13 @@ class _RideModeScreenState extends State<RideModeScreen> {
   final _recorder = RideRecorderService.instance;
   MapLibreMapController? _mapController;
   bool _resultShown = false;
+  bool _arrivalPromptShown = false;
+  bool _panelExpanded = false;
+  int _ridePanelTab = 0;
+  bool _followingRider = true;
+  Timer? _groupActionTimer;
+  DateTime _lastGroupActionAt = DateTime.now().toUtc();
+  bool _checkingGroupActions = false;
 
   @override
   void initState() {
@@ -30,12 +41,19 @@ class _RideModeScreenState extends State<RideModeScreen> {
     if (_recorder.status == RideRecorderStatus.completed) _recorder.reset();
     _recorder.addListener(_changed);
     Elm327Service.instance.addListener(_changed);
+    if (widget.sharedRide != null) {
+      _groupActionTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => _checkGroupActions(),
+      );
+    }
   }
 
   @override
   void dispose() {
     _recorder.removeListener(_changed);
     Elm327Service.instance.removeListener(_changed);
+    _groupActionTimer?.cancel();
     super.dispose();
   }
 
@@ -45,6 +63,10 @@ class _RideModeScreenState extends State<RideModeScreen> {
     if (_recorder.status == RideRecorderStatus.completed && !_resultShown) {
       _resultShown = true;
       WidgetsBinding.instance.addPostFrameCallback((_) => _showResult());
+    }
+    if (_recorder.arrivalConfirmationPending && !_arrivalPromptShown) {
+      _arrivalPromptShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showArrivalPrompt());
     }
   }
 
@@ -84,7 +106,12 @@ class _RideModeScreenState extends State<RideModeScreen> {
                   traveled: _recorder.traveledCoordinates,
                   currentLocation: _recorder.currentLocation,
                   followLocation:
+                      _followingRider &&
                       _recorder.status == RideRecorderStatus.recording,
+                  followBearing: true,
+                  onTrackingDismissed: () {
+                    if (mounted) setState(() => _followingRider = false);
+                  },
                   onControllerReady: (controller) =>
                       _mapController = controller,
                 ),
@@ -197,7 +224,7 @@ class _RideModeScreenState extends State<RideModeScreen> {
                 Text(
                   _recorder.isActive
                       ? '${remainingKm.toStringAsFixed(1)} km remaining · '
-                            '${_formatDuration(_recorder.elapsedDuration)} elapsed'
+                            '${_formatDuration(_recorder.movingDuration)} ride time'
                       : '${widget.plan.distanceKm.toStringAsFixed(1)} km · '
                             '${_formatDuration(widget.plan.duration)} estimated',
                   style: const TextStyle(
@@ -230,7 +257,7 @@ class _RideModeScreenState extends State<RideModeScreen> {
           ),
           const SizedBox(height: 5),
           const Text(
-            'Start is manual. GPS, elapsed time, route progress, and available ELM327 data will be recorded.',
+            'Start is manual. GPS, elapsed time, route progress, and available ELM327 data will be recorded. Android “While using the app” permission is enough to start; MotoMap keeps an active ride running with its location notification.',
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 10,
@@ -259,12 +286,16 @@ class _RideModeScreenState extends State<RideModeScreen> {
     final snapshot = Elm327Service.instance.ecuAvailable
         ? Elm327Service.instance.latestSnapshot
         : null;
-    return Column(
-      children: [
-        SurfaceCard(
-          color: MotoMapColors.background.withValues(alpha: 0.96),
-          padding: const EdgeInsets.all(13),
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.62,
+      ),
+      child: SurfaceCard(
+        color: MotoMapColors.background.withValues(alpha: 0.97),
+        padding: const EdgeInsets.all(12),
+        child: SingleChildScrollView(
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Row(
                 children: [
@@ -298,7 +329,6 @@ class _RideModeScreenState extends State<RideModeScreen> {
                             fontWeight: FontWeight.w900,
                           ),
                         ),
-                        const SizedBox(height: 2),
                         Text(
                           maneuver?.instruction ??
                               'Continue on the highlighted road',
@@ -309,108 +339,289 @@ class _RideModeScreenState extends State<RideModeScreen> {
                             fontWeight: FontWeight.w800,
                           ),
                         ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${_formatClock(_recorder.movingDuration)} ride time',
+                          style: const TextStyle(
+                            fontSize: 9,
+                            color: MotoMapColors.onSurfaceVariant,
+                          ),
+                        ),
                       ],
                     ),
                   ),
                   IconButton(
-                    tooltip: _recorder.voiceMuted
-                        ? 'Enable voice'
-                        : 'Mute voice',
+                    tooltip: _panelExpanded ? 'Minimize' : 'Show ride controls',
                     onPressed: () =>
-                        _recorder.setVoiceMuted(!_recorder.voiceMuted),
+                        setState(() => _panelExpanded = !_panelExpanded),
                     icon: Icon(
-                      _recorder.voiceMuted
-                          ? Icons.volume_off_rounded
-                          : Icons.volume_up_rounded,
+                      _panelExpanded
+                          ? Icons.expand_more_rounded
+                          : Icons.expand_less_rounded,
                     ),
                   ),
                 ],
               ),
-              const Divider(height: 22),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _RideStat(
-                    label: 'SPEED',
-                    value: _recorder.currentSpeedKph.toStringAsFixed(0),
-                    unit: 'km/h',
+              if (_panelExpanded) ...[
+                const Divider(height: 18),
+                Row(
+                  children: [
+                    _RidePanelTab(
+                      label: 'Ride',
+                      icon: Icons.navigation_rounded,
+                      selected: _ridePanelTab == 0,
+                      onTap: () => setState(() => _ridePanelTab = 0),
+                    ),
+                    _RidePanelTab(
+                      label: 'Actions',
+                      icon: Icons.touch_app_rounded,
+                      selected: _ridePanelTab == 1,
+                      onTap: () => setState(() => _ridePanelTab = 1),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (_ridePanelTab == 0) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _RideStat(
+                        label: 'SPEED',
+                        value: _recorder.currentSpeedKph.toStringAsFixed(0),
+                        unit: 'km/h',
+                      ),
+                      _RideStat(
+                        label: 'TOTAL',
+                        value: _formatClock(_recorder.elapsedDuration),
+                        unit: 'elapsed',
+                      ),
+                      _RideStat(
+                        label: 'PAUSED',
+                        value: _formatClock(_recorder.pausedDuration),
+                        unit: 'time',
+                      ),
+                    ],
                   ),
-                  _RideStat(
-                    label: 'ELAPSED',
-                    value: _formatClock(_recorder.elapsedDuration),
-                    unit: _recorder.isPaused ? 'paused' : 'total',
+                  const Divider(height: 22),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _RideStat(
+                        label: 'DISTANCE',
+                        value: _recorder.distanceKm.toStringAsFixed(1),
+                        unit: 'km',
+                      ),
+                      _RideStat(
+                        label: 'RPM',
+                        value: snapshot?.engineRpm?.toStringAsFixed(0) ?? 'N/A',
+                        unit: snapshot?.engineRpm == null ? '' : 'rpm',
+                      ),
+                      _RideStat(
+                        label: 'ENGINE',
+                        value:
+                            snapshot?.coolantTemperatureC?.toStringAsFixed(0) ??
+                            'N/A',
+                        unit: snapshot?.coolantTemperatureC == null ? '' : '°C',
+                      ),
+                    ],
                   ),
-                  _RideStat(
-                    label: 'MOVING',
-                    value: _formatClock(_recorder.movingDuration),
-                    unit: 'ride time',
-                  ),
-                ],
-              ),
-              const Divider(height: 22),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _RideStat(
-                    label: 'DISTANCE',
-                    value: _recorder.distanceKm.toStringAsFixed(1),
-                    unit: 'km',
-                  ),
-                  _RideStat(
-                    label: 'RPM',
-                    value: snapshot?.engineRpm?.toStringAsFixed(0) ?? 'N/A',
-                    unit: snapshot?.engineRpm == null ? '' : 'rpm',
-                  ),
-                  _RideStat(
-                    label: 'ENGINE',
-                    value:
-                        snapshot?.coolantTemperatureC?.toStringAsFixed(0) ??
-                        'N/A',
-                    unit: snapshot?.coolantTemperatureC == null ? '' : '°C',
-                  ),
-                ],
-              ),
+                ] else
+                  _rideActions(),
+              ],
             ],
           ),
         ),
-        const SizedBox(height: 9),
-        Row(
-          children: [
-            Expanded(
-              child: PrimaryButton(
-                label: _recorder.isPaused ? 'Continue' : 'Pause',
-                icon: _recorder.isPaused
-                    ? Icons.play_arrow_rounded
-                    : Icons.pause_rounded,
-                secondary: true,
-                onPressed: _recorder.status == RideRecorderStatus.finishing
-                    ? null
-                    : _recorder.isPaused
-                    ? _recorder.resume
-                    : _recorder.pause,
-              ),
+      ),
+    );
+  }
+
+  Widget _rideActions() => Column(
+    children: [
+      Row(
+        children: [
+          Expanded(
+            child: PrimaryButton(
+              label: _recorder.isPaused ? 'Continue' : 'Pause',
+              icon: _recorder.isPaused
+                  ? Icons.play_arrow_rounded
+                  : Icons.pause_rounded,
+              secondary: true,
+              onPressed: _recorder.isPaused
+                  ? _recorder.resume
+                  : _recorder.pause,
             ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: PrimaryButton(
-                label: _recorder.status == RideRecorderStatus.finishing
-                    ? 'Saving…'
-                    : 'End ride',
-                icon: Icons.stop_rounded,
-                onPressed: _recorder.status == RideRecorderStatus.finishing
-                    ? null
-                    : _confirmFinish,
-              ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: PrimaryButton(
+              label: 'End ride',
+              icon: Icons.stop_rounded,
+              onPressed: _confirmFinish,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _addUnplannedStop,
+              icon: const Icon(Icons.add_location_alt_rounded),
+              label: const Text('Add stop'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _recorder.rerouteNow,
+              icon: const Icon(Icons.alt_route_rounded),
+              label: const Text('Reroute'),
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      OutlinedButton.icon(
+        onPressed: _reconnectElm,
+        icon: const Icon(Icons.bluetooth_connected_rounded),
+        label: const Text('Connect / reconnect ELM327'),
+      ),
+      if (widget.sharedRide != null) ...[
+        const Divider(height: 20),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            'NOTIFY GROUP',
+            style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900),
+          ),
+        ),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            ActionChip(
+              label: const Text('Stopping'),
+              onPressed: () => _sendGroupAction('stopping'),
+            ),
+            ActionChip(
+              label: const Text('Fuel'),
+              onPressed: () => _sendGroupAction('fuel'),
+            ),
+            ActionChip(
+              label: const Text('Food'),
+              onPressed: () => _sendGroupAction('food'),
+            ),
+            ActionChip(
+              label: const Text('Regroup'),
+              onPressed: () => _sendGroupAction('regroup'),
+            ),
+            ActionChip(
+              label: const Text('Danger / emergency'),
+              onPressed: () => _sendGroupAction('danger'),
             ),
           ],
         ),
       ],
+    ],
+  );
+
+  Future<void> _addUnplannedStop() async {
+    final location = _recorder.currentLocation;
+    if (location == null) return;
+    final place = await Navigator.of(context).push<PlaceResult>(
+      MaterialPageRoute(
+        builder: (_) => LocationPickerScreen(currentLocation: location),
+      ),
+    );
+    if (place == null) return;
+    await _recorder.addUnplannedStop(
+      RouteWaypoint(name: place.name, location: place.location),
     );
   }
+
+  Future<void> _reconnectElm() async {
+    final bike = _recorder.motorcycle;
+    if (bike == null) return;
+    try {
+      await Elm327Service.instance.reconnectToMotorcycle(bike);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not reconnect ELM327: $error')),
+      );
+    }
+  }
+
+  Future<void> _sendGroupAction(String action) async {
+    final shared = widget.sharedRide;
+    if (shared == null) return;
+    try {
+      await SharedRideService.instance.sendAction(
+        sharedRideId: shared.id,
+        action: action,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${action.toUpperCase()} sent to the group.')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not notify the group: $error')),
+      );
+    }
+  }
+
+  Future<void> _checkGroupActions() async {
+    final shared = widget.sharedRide;
+    if (!mounted || shared == null || _checkingGroupActions) return;
+    _checkingGroupActions = true;
+    try {
+      final actions = await SharedRideService.instance.fetchActionsAfter(
+        sharedRideId: shared.id,
+        after: _lastGroupActionAt,
+      );
+      if (actions.isEmpty || !mounted) return;
+      _lastGroupActionAt = actions.last.createdAt;
+      final currentUserId = SharedRideService.instance.currentUserId;
+      for (final action in actions.where(
+        (item) => item.userId != currentUserId,
+      )) {
+        final member = shared.members.cast<SharedRideMember?>().firstWhere(
+          (item) => item?.userId == action.userId,
+          orElse: () => null,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${member?.riderName ?? 'A rider'}: ${_groupActionLabel(action.action)}',
+            ),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (_) {
+      // The next poll retries; navigation and recording remain uninterrupted.
+    } finally {
+      _checkingGroupActions = false;
+    }
+  }
+
+  static String _groupActionLabel(String action) => switch (action) {
+    'stopping' => 'Stopping',
+    'fuel' => 'Needs fuel',
+    'food' => 'Food stop requested',
+    'regroup' => 'Regroup requested',
+    'danger' => 'Danger / emergency',
+    _ => action,
+  };
 
   Future<void> _centerCurrentLocation() async {
     final location = _recorder.currentLocation;
     if (location == null) return;
+    setState(() => _followingRider = true);
     await _mapController?.animateCamera(
       CameraUpdate.newLatLngZoom(
         LatLng(location.latitude, location.longitude),
@@ -465,6 +676,57 @@ class _RideModeScreenState extends State<RideModeScreen> {
     if (confirmed == true) await _recorder.finish();
   }
 
+  Future<void> _showArrivalPrompt() async {
+    if (!mounted || !_recorder.arrivalConfirmationPending) return;
+    final finish = await showModalBottomSheet<bool>(
+      context: context,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: MotoMapColors.surfaceContainer,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.flag_circle_rounded,
+                size: 46,
+                color: MotoMapColors.success,
+              ),
+              const SizedBox(height: 8),
+              Text('Ride finished?', style: MotoMapText.headlineMd),
+              const SizedBox(height: 6),
+              const Text(
+                'MotoMap paused the ride because you reached the destination. Confirm to save the result, or continue riding.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              PrimaryButton(
+                label: 'Finish and save ride',
+                icon: Icons.flag_rounded,
+                onPressed: () => Navigator.pop(context, true),
+              ),
+              const SizedBox(height: 8),
+              PrimaryButton(
+                label: 'Continue riding',
+                secondary: true,
+                icon: Icons.play_arrow_rounded,
+                onPressed: () => Navigator.pop(context, false),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (finish == true) {
+      await _recorder.confirmArrivalAndFinish();
+    } else {
+      await _recorder.continueAfterArrival();
+      _arrivalPromptShown = false;
+    }
+  }
+
   Future<void> _showResult() async {
     await showModalBottomSheet<void>(
       context: context,
@@ -502,6 +764,59 @@ class _RideModeScreenState extends State<RideModeScreen> {
   }
 }
 
+class _RidePanelTab extends StatelessWidget {
+  const _RidePanelTab({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: selected
+              ? MotoMapColors.primary.withValues(alpha: 0.18)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 17,
+              color: selected
+                  ? MotoMapColors.primary
+                  : MotoMapColors.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                color: selected
+                    ? MotoMapColors.primary
+                    : MotoMapColors.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _RideResult extends StatelessWidget {
   const _RideResult({required this.recorder});
 
@@ -521,7 +836,7 @@ class _RideResult extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           Text(
-            'Ride saved',
+            'Completed ride result',
             textAlign: TextAlign.center,
             style: MotoMapText.headlineLg,
           ),
@@ -593,8 +908,8 @@ class _RideResult extends StatelessWidget {
           ],
           const SizedBox(height: 18),
           PrimaryButton(
-            label: 'View in Completed rides',
-            icon: Icons.check_rounded,
+            label: 'Back to Plan',
+            icon: Icons.arrow_back_rounded,
             onPressed: () => Navigator.pop(context),
           ),
         ],

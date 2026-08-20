@@ -1,22 +1,27 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/ride_data.dart';
+import '../services/motorcycle_service.dart';
 import '../services/ride_repository.dart';
 import '../services/routing_service.dart';
+import '../services/shared_ride_service.dart';
 import '../theme/motomap_colors.dart';
 import '../widgets/app_ui.dart';
+import '../widgets/motomap_map.dart';
+import 'location_picker_screen.dart';
 import 'route_detail_screen.dart';
 
-enum _PlanMode { destination, loop }
+enum PlanChoice { ai, destination, loop, surprise }
 
 class PlanScreen extends StatefulWidget {
   const PlanScreen({required this.onOpenRides, super.key});
-
   final VoidCallback onOpenRides;
 
   @override
@@ -24,718 +29,732 @@ class PlanScreen extends StatefulWidget {
 }
 
 class _PlanScreenState extends State<PlanScreen> {
-  final _promptController = TextEditingController();
-  final _distanceController = TextEditingController(text: '50');
-  _PlanMode _mode = _PlanMode.destination;
-  RoutePreference _preference = RoutePreference.balanced;
-  PlaceResult? _destination;
-  bool _generating = false;
-  RoutePlan? _generatedPlan;
-  bool _requestingWebLocation = false;
-  bool? _webLocationReady;
-  String? _webLocationMessage;
+  final _codeController = TextEditingController();
+  bool _working = false;
+  MapPoint? _mapLocation;
+  MapLibreMapController? _mapController;
 
   @override
   void initState() {
     super.initState();
-    if (kIsWeb) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _requestWebLocation();
-      });
-    }
+    unawaited(_loadMapLocation());
   }
 
   @override
   void dispose() {
-    _promptController.dispose();
-    _distanceController.dispose();
+    _codeController.dispose();
     super.dispose();
   }
 
-  Future<MapPoint> _currentLocation() async {
-    if (kIsWeb) return _webCurrentLocation();
+  Future<void> _loadMapLocation() async {
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) {
-        throw StateError(
-          'Turn on Location Services to plan from your position.',
-        );
+      final location = await _currentLocation();
+      if (mounted) {
+        setState(() => _mapLocation = location);
+        await _centerPlanMap(location);
       }
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        throw StateError('Location permission is required for route planning.');
-      }
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 20),
-        ),
-      );
-      return MapPoint(position.latitude, position.longitude);
-    } on MissingPluginException {
-      throw StateError(
-        'The location component was not loaded. Fully close MotoMap and install '
-        'the latest app build; hot reload cannot add a native plugin.',
-      );
-    }
-  }
-
-  Future<MapPoint> _webCurrentLocation() async {
-    final uri = Uri.base;
-    final isLocalhost = uri.host == 'localhost' || uri.host == '127.0.0.1';
-    if (uri.scheme != 'https' && !isLocalhost) {
-      final message =
-          'Safari can only ask for GPS permission from an HTTPS MotoMap '
-          'address. The current ${uri.scheme}://${uri.host} address is not '
-          'secure. Open an HTTPS deployment, then tap Enable location.';
-      _setWebLocationState(ready: false, message: message);
-      throw StateError(message);
-    }
-
-    try {
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: WebSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 20),
-          maximumAge: Duration(seconds: 10),
-        ),
-      );
-      _setWebLocationState(
-        ready: true,
-        message: 'Location is enabled for route planning.',
-      );
-      return MapPoint(position.latitude, position.longitude);
-    } on PermissionDeniedException {
-      const message =
-          'Location is blocked for this website. Change this site’s Location '
-          'permission to Ask or Allow in Safari, then tap Enable location.';
-      _setWebLocationState(ready: false, message: message);
-      throw StateError(message);
-    } on LocationServiceDisabledException {
-      const message =
-          'Location Services are disabled on this device. Turn them on, then '
-          'tap Enable location.';
-      _setWebLocationState(ready: false, message: message);
-      throw StateError(message);
-    } on TimeoutException {
-      const message =
-          'MotoMap did not receive a GPS position in time. Check Location '
-          'Services and try Enable location again.';
-      _setWebLocationState(ready: false, message: message);
-      throw StateError(message);
-    } on PositionUpdateException {
-      const message =
-          'The browser could not determine your position. Check Location '
-          'Services and try Enable location again.';
-      _setWebLocationState(ready: false, message: message);
-      throw StateError(message);
-    }
-  }
-
-  Future<void> _requestWebLocation() async {
-    if (_requestingWebLocation) return;
-    setState(() => _requestingWebLocation = true);
-    try {
-      await _webCurrentLocation();
     } catch (_) {
-      // The location card contains the specific recovery action.
-    } finally {
-      if (mounted) setState(() => _requestingWebLocation = false);
+      // Permission can be retried when the rider starts planning.
     }
   }
 
-  void _setWebLocationState({required bool ready, required String message}) {
-    if (!mounted) return;
-    setState(() {
-      _webLocationReady = ready;
-      _webLocationMessage = message;
-    });
-  }
-
-  Future<void> _generateManual() async {
-    if (_mode == _PlanMode.destination && _destination == null) {
-      await _chooseDestination();
-      if (_destination == null) return;
-    }
-    final requestedDistance = double.tryParse(_distanceController.text.trim());
-    if (_mode == _PlanMode.loop &&
-        (requestedDistance == null || requestedDistance < 3)) {
-      _showError('Enter a loop distance of at least 3 km.');
-      return;
-    }
-    await _generateAndSave(
-      isLoop: _mode == _PlanMode.loop,
-      destination: _destination,
-      requestedDistanceKm: requestedDistance,
-      preference: _preference,
-      source: 'manual',
-    );
-  }
-
-  Future<void> _generateSmart() async {
-    final prompt = _promptController.text.trim();
-    if (prompt.length < 5) {
-      _showError('Describe the ride, destination, or loop distance first.');
-      return;
-    }
-    final intent = RoutingService.instance.parsePrompt(prompt);
-    final requestedDistance =
-        intent.distanceKm ??
-        (intent.durationMinutes == null
-            ? null
-            : intent.durationMinutes! / 60 * 45);
-    PlaceResult? destination;
-    if (!intent.isLoop) {
-      final query = intent.destinationQuery;
-      if (query == null) {
-        _showError(
-          'Include a destination using wording such as “ride to Tagaytay”.',
-        );
-        return;
-      }
-      setState(() => _generating = true);
-      try {
-        final origin = await _currentLocation();
-        final results = await RoutingService.instance.searchPlaces(
-          query,
-          near: origin,
-        );
-        if (results.isEmpty) {
-          throw StateError('No matching destination was found for “$query”.');
-        }
-        destination = results.first;
-      } catch (error) {
-        _showError(_friendlyError(error));
-        if (mounted) setState(() => _generating = false);
-        return;
-      }
-      if (mounted) setState(() => _generating = false);
-    }
-    await _generateAndSave(
-      isLoop: intent.isLoop,
-      destination: destination,
-      requestedDistanceKm: requestedDistance ?? 50,
-      requestedDurationMinutes: intent.durationMinutes,
-      preference: intent.preference,
-      source: 'smart_prompt',
-      prompt: prompt,
-    );
-  }
-
-  Future<void> _generateAndSave({
-    required bool isLoop,
-    required PlaceResult? destination,
-    required double? requestedDistanceKm,
-    required RoutePreference preference,
-    required String source,
-    String? prompt,
-    int? requestedDurationMinutes,
+  Future<void> _openChoice(
+    PlanChoice choice, {
+    PlaceResult? initialDestination,
   }) async {
-    setState(() => _generating = true);
+    final request = await Navigator.of(context).push<_PlanRequest>(
+      MaterialPageRoute(
+        builder: (_) => _PlanQuestionsScreen(
+          choice: choice,
+          initialDestination: initialDestination,
+        ),
+      ),
+    );
+    if (request != null && mounted) await _generate(request);
+  }
+
+  Future<void> _chooseDestination() async {
+    try {
+      final origin = _mapLocation ?? await _currentLocation();
+      if (mounted && _mapLocation == null) {
+        setState(() => _mapLocation = origin);
+      }
+      if (!mounted) return;
+      final destination = await Navigator.of(context).push<PlaceResult>(
+        MaterialPageRoute(
+          builder: (_) => LocationPickerScreen(currentLocation: origin),
+        ),
+      );
+      if (destination != null && mounted) {
+        await _openChoice(
+          PlanChoice.destination,
+          initialDestination: destination,
+        );
+      }
+    } catch (error) {
+      _message(_friendlyError(error));
+    }
+  }
+
+  Future<void> _showJoinRide() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          4,
+          20,
+          MediaQuery.viewInsetsOf(sheetContext).bottom + 24,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Join a group ride', style: MotoMapText.headlineMd),
+            const SizedBox(height: 6),
+            const Text(
+              'Enter the private six-character code from the ride leader.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: MotoMapColors.onSurfaceVariant),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _codeController,
+              autofocus: true,
+              maxLength: 6,
+              textCapitalization: TextCapitalization.characters,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp('[A-Za-z0-9]')),
+                UpperCaseTextFormatter(),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Ride code',
+                hintText: 'A7K9P2',
+                counterText: '',
+                prefixIcon: Icon(Icons.groups_2_outlined),
+              ),
+            ),
+            const SizedBox(height: 12),
+            PrimaryButton(
+              label: 'Enter group ride',
+              icon: Icons.login_rounded,
+              onPressed: () {
+                Navigator.pop(sheetContext);
+                _joinSharedRide();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _generate(_PlanRequest request) async {
+    setState(() => _working = true);
     try {
       final origin = await _currentLocation();
-      final route = isLoop
-          ? await RoutingService.instance.createLoop(
+      var destination = request.destination;
+      var isLoop =
+          request.choice == PlanChoice.loop ||
+          request.choice == PlanChoice.surprise;
+      var preference = request.preference;
+      var distanceKm = request.distanceKm;
+      var durationMinutes = request.durationMinutes;
+      final prompt = request.prompt;
+
+      if (request.choice == PlanChoice.ai) {
+        final intent = RoutingService.instance.parsePrompt(prompt!);
+        isLoop = intent.isLoop;
+        preference = intent.preference;
+        distanceKm =
+            intent.distanceKm ??
+            (intent.durationMinutes == null
+                ? 50
+                : intent.durationMinutes! / 60 * 45);
+        durationMinutes = intent.durationMinutes;
+        if (!isLoop) {
+          if (intent.destinationQuery == null) {
+            throw StateError(
+              'Include a destination such as “ride to Tagaytay,” or ask for a loop.',
+            );
+          }
+          final matches = await RoutingService.instance.searchPlaces(
+            intent.destinationQuery!,
+            near: origin,
+          );
+          if (matches.isEmpty) {
+            throw StateError('No real destination matched that description.');
+          }
+          destination = matches.first;
+        }
+      }
+
+      final alternatives = isLoop
+          ? await _loopAlternatives(
               origin: origin,
-              requestedDistanceKm: requestedDistanceKm ?? 50,
+              distanceKm:
+                  distanceKm ??
+                  (durationMinutes == null ? 50 : durationMinutes / 60 * 45),
               preference: preference,
+              heading: request.headingDegrees,
+              avoidHighways: request.avoidHighways,
+              avoidTolls: request.avoidTolls,
             )
-          : await RoutingService.instance.routeToDestination(
+          : await RoutingService.instance.routeAlternatives(
               origin: origin,
               destination: destination!.location,
               preference: preference,
+              avoidHighways: request.avoidHighways,
+              avoidTolls: request.avoidTolls,
             );
+      if (alternatives.isEmpty) {
+        throw StateError('No usable motorcycle route was returned.');
+      }
+      final primaryBike = await MotorcycleService.instance
+          .fetchPrimaryMotorcycle();
+      final selected = alternatives.first;
       final title = isLoop
-          ? '${route.distanceKm.round()} km ${preference.label} Loop'
+          ? '${selected.route.distanceKm.round()} km ${preference.label} Loop'
           : destination!.name;
-      final saved = await RideRepository.instance.saveRoutePlan(
-        route: route,
+      final plan = await RideRepository.instance.saveRoutePlan(
+        route: selected.route,
         title: title,
-        source: source,
+        source: switch (request.choice) {
+          PlanChoice.ai => 'smart_prompt',
+          PlanChoice.surprise => 'quick_idea',
+          _ => 'manual',
+        },
         prompt: prompt,
         originName: 'Current location',
         destinationName: isLoop ? 'Return to start' : destination!.displayName,
         isLoop: isLoop,
-        preference: preference,
-        requestedDistanceKm: isLoop ? requestedDistanceKm : null,
-        requestedDurationMinutes: requestedDurationMinutes,
+        preference: selected.preference,
+        requestedDistanceKm: isLoop ? distanceKm : null,
+        requestedDurationMinutes: durationMinutes,
+        scheduledFor: request.rideLater ? request.scheduledFor : null,
+        motorcycleId: primaryBike?.id,
+        departureMode: request.rideLater ? 'later' : 'now',
+        avoidHighways: request.avoidHighways,
+        avoidTolls: request.avoidTolls,
       );
       if (!mounted) return;
-      setState(() {
-        _generatedPlan = saved;
-        _generating = false;
-        _mode = isLoop ? _PlanMode.loop : _PlanMode.destination;
-        _preference = preference;
-        _destination = destination;
-      });
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              RouteDetailScreen(plan: plan, alternatives: alternatives),
+        ),
+      );
     } catch (error) {
-      if (mounted) setState(() => _generating = false);
-      _showError(_friendlyError(error));
+      _message(_friendlyError(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
     }
   }
 
-  Future<void> _chooseDestination() async {
-    MapPoint? near;
+  Future<List<RouteAlternative>> _loopAlternatives({
+    required MapPoint origin,
+    required double distanceKm,
+    required RoutePreference preference,
+    required double? heading,
+    required bool avoidHighways,
+    required bool avoidTolls,
+  }) async {
+    final baseHeading = heading ?? math.Random().nextInt(360).toDouble();
+    final preferences = <RoutePreference>{
+      preference,
+      RoutePreference.fastest,
+      RoutePreference.scenic,
+    }.toList(growable: false);
+    final results = <RouteAlternative>[];
+    for (var index = 0; index < preferences.length; index++) {
+      try {
+        final route = await RoutingService.instance.createLoop(
+          origin: origin,
+          requestedDistanceKm: distanceKm,
+          preference: preferences[index],
+          headingDegrees: (baseHeading + index * 75) % 360,
+          avoidHighways: avoidHighways,
+          avoidTolls: avoidTolls,
+        );
+        results.add(
+          RouteAlternative(
+            route: route,
+            preference: preferences[index],
+            label: index == 0 ? 'Recommended' : preferences[index].label,
+          ),
+        );
+      } catch (_) {
+        if (results.isEmpty && index == preferences.length - 1) rethrow;
+      }
+    }
+    return results;
+  }
+
+  Future<void> _joinSharedRide() async {
+    final code = _codeController.text.trim().toUpperCase();
+    if (!RegExp(r'^[A-Z0-9]{6}$').hasMatch(code)) {
+      _message('Enter the six-character code.');
+      return;
+    }
+    setState(() => _working = true);
     try {
-      near = await _currentLocation();
-    } catch (_) {
-      near = null;
+      final bike = await MotorcycleService.instance.fetchPrimaryMotorcycle();
+      final shared = await SharedRideService.instance.join(
+        code: code,
+        motorcycleId: bike?.id,
+      );
+      final plan = await RideRepository.instance.fetchRoutePlan(
+        shared.routePlanId,
+      );
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RouteDetailScreen(plan: plan, sharedRide: shared),
+        ),
+      );
+    } catch (error) {
+      _message(_friendlyError(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
     }
-    if (!mounted) return;
-    final result = await showModalBottomSheet<PlaceResult>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: MotoMapColors.surfaceContainer,
-      showDragHandle: true,
-      builder: (context) => _DestinationSearch(near: near),
-    );
-    if (result != null && mounted) setState(() => _destination = result);
   }
 
-  void _showError(String message) {
+  Future<MapPoint> _currentLocation() async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      throw StateError('Turn on Location Services to plan from your position.');
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      throw StateError('Location permission is required for route planning.');
+    }
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: kIsWeb
+            ? WebSettings(
+                accuracy: LocationAccuracy.high,
+                timeLimit: const Duration(seconds: 20),
+              )
+            : const LocationSettings(
+                accuracy: LocationAccuracy.high,
+                timeLimit: Duration(seconds: 20),
+              ),
+      );
+      return MapPoint(position.latitude, position.longitude);
+    } on MissingPluginException {
+      throw StateError('Install the latest MotoMap build to enable GPS.');
+    }
+  }
+
+  void _message(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      bottom: false,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text('Plan a ride', style: MotoMapText.headlineLg),
-              ),
-              IconButton.filledTonal(
-                onPressed: widget.onOpenRides,
-                tooltip: 'Saved plans',
-                icon: const Icon(Icons.bookmark_outline_rounded),
-              ),
-            ],
-          ),
-          const SizedBox(height: 5),
-          Text(
-            'Real roads, motorcycle routing, and voice-ready directions.',
-            style: MotoMapText.bodyMd.copyWith(
-              color: MotoMapColors.onSurfaceVariant,
-            ),
-          ),
-          if (kIsWeb) ...[
-            const SizedBox(height: 14),
-            SurfaceCard(
-              color: _webLocationReady == true
-                  ? MotoMapColors.success.withValues(alpha: 0.08)
-                  : MotoMapColors.surfaceContainerLow,
-              borderColor: _webLocationReady == true
-                  ? MotoMapColors.success.withValues(alpha: 0.35)
-                  : MotoMapColors.warning.withValues(alpha: 0.35),
-              child: Row(
-                children: [
-                  Icon(
-                    _webLocationReady == true
-                        ? Icons.location_on_rounded
-                        : Icons.location_off_outlined,
-                    color: _webLocationReady == true
-                        ? MotoMapColors.success
-                        : MotoMapColors.warning,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _webLocationReady == true
-                              ? 'Location enabled'
-                              : 'Location required',
-                          style: const TextStyle(fontWeight: FontWeight.w800),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          _webLocationMessage ??
-                              'MotoMap will ask for your location to plan from '
-                                  'your current position.',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: MotoMapColors.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_webLocationReady != true) ...[
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: _requestingWebLocation
-                          ? null
-                          : _requestWebLocation,
-                      child: _requestingWebLocation
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('Enable'),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 20),
-          SurfaceCard(
-            borderColor: MotoMapColors.primary.withValues(alpha: 0.28),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Row(
-                  children: [
-                    Icon(
-                      Icons.auto_awesome_rounded,
-                      color: MotoMapColors.primary,
-                    ),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Smart route planner',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                    AppPill(label: 'NO PAID API', compact: true),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Try “80 km scenic loop” or “ride to Tagaytay using curvy roads”.',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: MotoMapColors.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _promptController,
-                  minLines: 2,
-                  maxLines: 4,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) => _generating ? null : _generateSmart(),
-                  decoration: const InputDecoration(
-                    hintText:
-                        'Describe destination, distance, time, and road style',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: _generating ? null : _generateSmart,
-                    icon: _generating
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.alt_route_rounded),
-                    label: Text(
-                      _generating ? 'Building real route…' : 'Generate route',
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 22),
-          const SectionHeader(
-            'Build it yourself',
-            subtitle: 'Choose a destination or a loop distance',
-          ),
-          const SizedBox(height: 12),
-          SurfaceCard(
-            child: Column(
-              children: [
-                SegmentedButton<_PlanMode>(
-                  segments: const [
-                    ButtonSegment(
-                      value: _PlanMode.destination,
-                      icon: Icon(Icons.location_on_outlined),
-                      label: Text('Destination'),
-                    ),
-                    ButtonSegment(
-                      value: _PlanMode.loop,
-                      icon: Icon(Icons.loop_rounded),
-                      label: Text('Loop ride'),
-                    ),
-                  ],
-                  selected: {_mode},
-                  onSelectionChanged: (value) =>
-                      setState(() => _mode = value.first),
-                ),
-                const SizedBox(height: 14),
-                if (_mode == _PlanMode.destination)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(
-                      Icons.search_rounded,
-                      color: MotoMapColors.primary,
-                    ),
-                    title: Text(
-                      _destination?.name ?? 'Search destination',
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                    subtitle: Text(
-                      _destination?.displayName ??
-                          'Search happens only when you submit, respecting the free geocoder policy.',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: _chooseDestination,
-                  )
-                else
-                  TextField(
-                    controller: _distanceController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Requested loop distance',
-                      suffixText: 'km',
-                      prefixIcon: Icon(Icons.route_rounded),
-                    ),
-                  ),
-                const SizedBox(height: 14),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('ROAD STYLE', style: MotoMapText.labelCaps),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final preference in RoutePreference.values)
-                      AppPill(
-                        label: preference.label,
-                        selected: _preference == preference,
-                        onTap: () => setState(() => _preference = preference),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                PrimaryButton(
-                  label: _generating
-                      ? 'Building route…'
-                      : 'Preview and save route',
-                  icon: Icons.map_outlined,
-                  onPressed: _generating ? null : _generateManual,
-                ),
-              ],
-            ),
-          ),
-          if (_generatedPlan != null) ...[
-            const SizedBox(height: 16),
-            SurfaceCard(
-              color: const Color(0xFF14201B),
-              borderColor: MotoMapColors.success.withValues(alpha: 0.35),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'ROUTE SAVED',
-                    style: TextStyle(
-                      color: MotoMapColors.success,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _generatedPlan!.title,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '${_generatedPlan!.distanceKm.toStringAsFixed(1)} km · '
-                    '${_formatDuration(_generatedPlan!.duration)} · '
-                    '${_generatedPlan!.maneuvers.length} directions',
-                    style: const TextStyle(
-                      color: MotoMapColors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  PrimaryButton(
-                    label: 'Review route',
-                    icon: Icons.arrow_forward_rounded,
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            RouteDetailScreen(plan: _generatedPlan!),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  static String _friendlyError(Object error) {
-    final text = error.toString();
-    return text.startsWith('Bad state: ') ? text.substring(11) : text;
-  }
-
-  static String _formatDuration(Duration duration) {
-    final hours = duration.inHours;
-    final minutes = duration.inMinutes.remainder(60);
-    return hours == 0 ? '${minutes}m' : '${hours}h ${minutes}m';
-  }
-}
-
-class _DestinationSearch extends StatefulWidget {
-  const _DestinationSearch({required this.near});
-
-  final MapPoint? near;
-
-  @override
-  State<_DestinationSearch> createState() => _DestinationSearchState();
-}
-
-class _DestinationSearchState extends State<_DestinationSearch> {
-  final _controller = TextEditingController();
-  List<PlaceResult> _results = const [];
-  bool _searching = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _search() async {
-    if (_controller.text.trim().length < 2) return;
-    setState(() {
-      _searching = true;
-      _error = null;
-    });
+  Future<void> _centerPlanMap([MapPoint? knownLocation]) async {
     try {
-      final results = await RoutingService.instance.searchPlaces(
-        _controller.text,
-        near: widget.near,
+      final location =
+          knownLocation ?? _mapLocation ?? await _currentLocation();
+      if (mounted && _mapLocation != location) {
+        setState(() => _mapLocation = location);
+      }
+      await _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(location.latitude, location.longitude),
+          15,
+        ),
+        duration: const Duration(milliseconds: 500),
       );
-      if (mounted) setState(() => _results = results);
     } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
-    } finally {
-      if (mounted) setState(() => _searching = false);
+      _message(_friendlyError(error));
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          4,
-          20,
-          MediaQuery.viewInsetsOf(context).bottom + 20,
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: MotoMapView(
+            route: const [],
+            currentLocation: _mapLocation,
+            onControllerReady: (controller) {
+              _mapController = controller;
+              if (_mapLocation != null) unawaited(_centerPlanMap(_mapLocation));
+            },
+          ),
         ),
-        child: SizedBox(
-          height: MediaQuery.sizeOf(context).height * 0.72,
+        Positioned(
+          right: 14,
+          top: MediaQuery.paddingOf(context).top + 64,
+          child: IconButton.filled(
+            tooltip: 'Recenter on me',
+            onPressed: _working ? null : _centerPlanMap,
+            icon: const Icon(Icons.my_location_rounded),
+          ),
+        ),
+        SafeArea(
+          bottom: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+            child: Row(
+              children: [
+                const Expanded(child: MotoMapLogo(compact: true)),
+                IconButton.filled(
+                  tooltip: 'Saved rides',
+                  onPressed: widget.onOpenRides,
+                  icon: const Icon(Icons.bookmark_outline_rounded),
+                ),
+              ],
+            ),
+          ),
+        ),
+        DraggableScrollableSheet(
+          initialChildSize: 0.54,
+          minChildSize: 0.24,
+          maxChildSize: 0.88,
+          snap: true,
+          snapSizes: const [0.24, 0.54, 0.88],
+          builder: (context, scrollController) => DecoratedBox(
+            decoration: const BoxDecoration(
+              color: MotoMapColors.surface,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+              boxShadow: [BoxShadow(color: Colors.black54, blurRadius: 22)],
+            ),
+            child: ListView(
+              controller: scrollController,
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+              children: [
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: MotoMapColors.outlineVariant,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                GestureDetector(
+                  onTap: _working ? null : _chooseDestination,
+                  child: const AbsorbPointer(
+                    child: TextField(
+                      decoration: InputDecoration(
+                        hintText: 'Search a destination or place',
+                        prefixIcon: Icon(Icons.search_rounded),
+                        suffixIcon: Icon(Icons.mic_none_rounded),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text('Plan your ride', style: MotoMapText.headlineMd),
+                const SizedBox(height: 4),
+                const Text(
+                  'Choose one way to begin. Every route uses real motorcycle roads.',
+                  style: TextStyle(color: MotoMapColors.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                _PlanChoiceCard(
+                  title: 'AI Ride Planner',
+                  subtitle: 'Describe your ideal ride in your own words',
+                  icon: Icons.auto_awesome_rounded,
+                  featured: true,
+                  onTap: () => _openChoice(PlanChoice.ai),
+                ),
+                const SizedBox(height: 9),
+                _PlanChoiceCard(
+                  title: 'Choose a destination',
+                  subtitle:
+                      'Search, browse nearby places, or long-press the map',
+                  icon: Icons.location_on_outlined,
+                  onTap: _chooseDestination,
+                ),
+                const SizedBox(height: 9),
+                _PlanChoiceCard(
+                  title: 'Plan a loop',
+                  subtitle: 'Choose distance or time and return to your start',
+                  icon: Icons.loop_rounded,
+                  onTap: () => _openChoice(PlanChoice.loop),
+                ),
+                const SizedBox(height: 9),
+                _PlanChoiceCard(
+                  title: 'Surprise me',
+                  subtitle: 'Give MotoMap your time and preferred direction',
+                  icon: Icons.casino_outlined,
+                  onTap: () => _openChoice(PlanChoice.surprise),
+                ),
+                const SizedBox(height: 9),
+                _PlanChoiceCard(
+                  title: 'Join a group ride',
+                  subtitle: 'Enter the leader’s private six-character code',
+                  icon: Icons.groups_2_outlined,
+                  onTap: _showJoinRide,
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_working)
+          const Positioned.fill(
+            child: ColoredBox(
+              color: Color(0x99070B09),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          ),
+      ],
+    );
+  }
+
+  static String _friendlyError(Object error) =>
+      error.toString().replaceFirst('Bad state: ', '');
+}
+
+class _PlanChoiceCard extends StatelessWidget {
+  const _PlanChoiceCard({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.onTap,
+    this.featured = false,
+  });
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool featured;
+
+  @override
+  Widget build(BuildContext context) => SurfaceCard(
+    onTap: onTap,
+    borderColor: featured
+        ? MotoMapColors.primary.withValues(alpha: 0.55)
+        : MotoMapColors.outlineVariant,
+    child: Row(
+      children: [
+        CircleAvatar(
+          radius: featured ? 25 : 22,
+          backgroundColor: MotoMapColors.primary.withValues(alpha: 0.14),
+          foregroundColor: MotoMapColors.primary,
+          child: Icon(icon),
+        ),
+        const SizedBox(width: 13),
+        Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Choose destination', style: MotoMapText.headlineMd),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _controller,
-                autofocus: true,
-                textInputAction: TextInputAction.search,
-                onSubmitted: (_) => _search(),
-                decoration: InputDecoration(
-                  hintText: 'Place, landmark, or address',
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  suffixIcon: IconButton(
-                    onPressed: _searching ? null : _search,
-                    icon: _searching
-                        ? const Padding(
-                            padding: EdgeInsets.all(12),
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.arrow_forward_rounded),
-                  ),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
                 ),
               ),
-              const SizedBox(height: 8),
-              const Text(
-                'Search data © OpenStreetMap contributors',
-                style: TextStyle(
-                  fontSize: 9,
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontSize: 10,
                   color: MotoMapColors.onSurfaceVariant,
                 ),
               ),
-              if (_error != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  _error!,
-                  style: const TextStyle(color: MotoMapColors.error),
-                ),
-              ],
-              const SizedBox(height: 8),
-              Expanded(
-                child: _results.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'Submit a search to see real locations.',
-                          style: TextStyle(
-                            color: MotoMapColors.onSurfaceVariant,
-                          ),
-                        ),
-                      )
-                    : ListView.separated(
-                        itemCount: _results.length,
-                        separatorBuilder: (_, __) => const Divider(),
-                        itemBuilder: (context, index) {
-                          final result = _results[index];
-                          return ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: const Icon(
-                              Icons.location_on_outlined,
-                              color: MotoMapColors.primary,
-                            ),
-                            title: Text(
-                              result.name,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            subtitle: Text(
-                              result.displayName,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            onTap: () => Navigator.pop(context, result),
-                          );
-                        },
-                      ),
+            ],
+          ),
+        ),
+        const Icon(Icons.chevron_right_rounded),
+      ],
+    ),
+  );
+}
+
+class _PlanRequest {
+  const _PlanRequest({
+    required this.choice,
+    required this.preference,
+    required this.rideLater,
+    required this.avoidHighways,
+    required this.avoidTolls,
+    this.prompt,
+    this.destination,
+    this.distanceKm,
+    this.durationMinutes,
+    this.scheduledFor,
+    this.headingDegrees,
+  });
+  final PlanChoice choice;
+  final RoutePreference preference;
+  final String? prompt;
+  final PlaceResult? destination;
+  final double? distanceKm;
+  final int? durationMinutes;
+  final bool rideLater;
+  final DateTime? scheduledFor;
+  final double? headingDegrees;
+  final bool avoidHighways;
+  final bool avoidTolls;
+}
+
+class _PlanQuestionsScreen extends StatefulWidget {
+  const _PlanQuestionsScreen({required this.choice, this.initialDestination});
+  final PlanChoice choice;
+  final PlaceResult? initialDestination;
+
+  @override
+  State<_PlanQuestionsScreen> createState() => _PlanQuestionsScreenState();
+}
+
+class _PlanQuestionsScreenState extends State<_PlanQuestionsScreen> {
+  final _prompt = TextEditingController();
+  final _target = TextEditingController(text: '50');
+  final _search = TextEditingController();
+  RoutePreference _preference = RoutePreference.balanced;
+  PlaceResult? _destination;
+  List<PlaceResult> _results = const [];
+  bool _searching = false;
+  bool _rideLater = false;
+  bool _targetTime = false;
+  bool _avoidHighways = false;
+  bool _avoidTolls = false;
+  DateTime? _scheduledFor;
+  int _surpriseMinutes = 120;
+  double? _heading;
+
+  @override
+  void initState() {
+    super.initState();
+    _destination = widget.initialDestination;
+  }
+
+  @override
+  void dispose() {
+    _prompt.dispose();
+    _target.dispose();
+    _search.dispose();
+    super.dispose();
+  }
+
+  String get _title => switch (widget.choice) {
+    PlanChoice.ai => 'AI Ride Planner',
+    PlanChoice.destination => 'Plan route',
+    PlanChoice.loop => 'Plan loop',
+    PlanChoice.surprise => 'Surprise mode',
+  };
+
+  Future<void> _findDestination() async {
+    if (_search.text.trim().length < 2) return;
+    setState(() => _searching = true);
+    try {
+      final results = await RoutingService.instance.searchPlaces(_search.text);
+      if (mounted) setState(() => _results = results);
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
+  Future<void> _pickSchedule() async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      firstDate: DateTime(now.year, now.month, now.day),
+      lastDate: now.add(const Duration(days: 365)),
+      initialDate: _scheduledFor ?? now,
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(
+        _scheduledFor ?? now.add(const Duration(hours: 1)),
+      ),
+    );
+    if (time == null) return;
+    setState(() {
+      _scheduledFor = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
+    });
+  }
+
+  void _continue() {
+    if (widget.choice == PlanChoice.ai && _prompt.text.trim().length < 5) {
+      _error('Describe your ride first.');
+      return;
+    }
+    if (widget.choice == PlanChoice.destination && _destination == null) {
+      _error('Search and choose a destination.');
+      return;
+    }
+    if (_rideLater && _scheduledFor == null) {
+      _error('Choose the planned departure date and time.');
+      return;
+    }
+    final value = double.tryParse(_target.text.trim());
+    if (widget.choice == PlanChoice.loop && (value == null || value <= 0)) {
+      _error('Enter a valid time or distance.');
+      return;
+    }
+    Navigator.pop(
+      context,
+      _PlanRequest(
+        choice: widget.choice,
+        preference: _preference,
+        prompt: widget.choice == PlanChoice.ai ? _prompt.text.trim() : null,
+        destination: _destination,
+        distanceKm: widget.choice == PlanChoice.loop && !_targetTime
+            ? value
+            : null,
+        durationMinutes: widget.choice == PlanChoice.loop && _targetTime
+            ? ((value ?? 1) * 60).round()
+            : widget.choice == PlanChoice.surprise
+            ? _surpriseMinutes
+            : null,
+        rideLater: _rideLater,
+        scheduledFor: _rideLater ? _scheduledFor : null,
+        headingDegrees: _heading,
+        avoidHighways: _avoidHighways,
+        avoidTolls: _avoidTolls,
+      ),
+    );
+  }
+
+  void _error(String message) => ScaffoldMessenger.of(
+    context,
+  ).showSnackBar(SnackBar(content: Text(message)));
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(_title)),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
+            children: [
+              if (widget.choice == PlanChoice.ai) _aiQuestions(),
+              if (widget.choice == PlanChoice.destination)
+                _destinationQuestions(),
+              if (widget.choice == PlanChoice.loop) _loopQuestions(),
+              if (widget.choice == PlanChoice.surprise) _surpriseQuestions(),
+              const SizedBox(height: 12),
+              _timingQuestions(),
+              const SizedBox(height: 12),
+              _roadQuestions(),
+              const SizedBox(height: 18),
+              PrimaryButton(
+                label: 'Preview real routes',
+                icon: Icons.alt_route_rounded,
+                onPressed: _continue,
               ),
             ],
           ),
@@ -743,4 +762,299 @@ class _DestinationSearchState extends State<_DestinationSearch> {
       ),
     );
   }
+
+  Widget _aiQuestions() => SurfaceCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Describe your ideal journey',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _prompt,
+          minLines: 4,
+          maxLines: 7,
+          decoration: const InputDecoration(
+            hintText: 'A 3-hour scenic loop avoiding highways',
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _destinationQuestions() => Column(
+    children: [
+      if (_destination != null) ...[
+        SurfaceCard(
+          borderColor: MotoMapColors.primary,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(
+              Icons.location_on_rounded,
+              color: MotoMapColors.primary,
+            ),
+            title: Text(_destination!.name),
+            subtitle: Text(
+              _destination!.displayName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              tooltip: 'Choose another location',
+              onPressed: _chooseAnotherDestination,
+              icon: const Icon(Icons.edit_location_alt_outlined),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+      ],
+      SurfaceCard(
+        child: TextField(
+          controller: _search,
+          textInputAction: TextInputAction.search,
+          onSubmitted: (_) => _findDestination(),
+          decoration: InputDecoration(
+            labelText: 'Where to?',
+            prefixIcon: const Icon(Icons.location_on_outlined),
+            suffixIcon: IconButton(
+              onPressed: _searching ? null : _findDestination,
+              icon: _searching
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.search_rounded),
+            ),
+          ),
+        ),
+      ),
+      if (_results.isNotEmpty) ...[
+        const SizedBox(height: 8),
+        SurfaceCard(
+          child: Column(
+            children: [
+              for (final result in _results.take(5))
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    _destination == result
+                        ? Icons.check_circle
+                        : Icons.location_on_outlined,
+                    color: MotoMapColors.primary,
+                  ),
+                  title: Text(result.name),
+                  subtitle: Text(
+                    result.displayName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => setState(() => _destination = result),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ],
+  );
+
+  Future<void> _chooseAnotherDestination() async {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 20),
+        ),
+      );
+      if (!mounted) return;
+      final selected = await Navigator.of(context).push<PlaceResult>(
+        MaterialPageRoute(
+          builder: (_) => LocationPickerScreen(
+            currentLocation: MapPoint(position.latitude, position.longitude),
+          ),
+        ),
+      );
+      if (selected != null && mounted) {
+        setState(() => _destination = selected);
+      }
+    } catch (error) {
+      _error(error.toString().replaceFirst('Bad state: ', ''));
+    }
+  }
+
+  Widget _loopQuestions() => SurfaceCard(
+    child: Column(
+      children: [
+        SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: false, label: Text('Distance')),
+            ButtonSegment(value: true, label: Text('Time')),
+          ],
+          selected: {_targetTime},
+          onSelectionChanged: (value) => setState(() {
+            _targetTime = value.first;
+            _target.text = _targetTime ? '2' : '50';
+          }),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _target,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: InputDecoration(
+            labelText: _targetTime ? 'Ride duration' : 'Loop distance',
+            suffixText: _targetTime ? 'hours' : 'km',
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _surpriseQuestions() => Column(
+    children: [
+      SurfaceCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'How much time do you have?',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final minutes in [60, 120, 240, 480])
+                  AppPill(
+                    label: minutes == 480
+                        ? 'Full day'
+                        : '${minutes ~/ 60} hr${minutes == 60 ? '' : 's'}',
+                    selected: _surpriseMinutes == minutes,
+                    onTap: () => setState(() => _surpriseMinutes = minutes),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 10),
+      SurfaceCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Heading',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final item in const [
+                  ('Any', null),
+                  ('N', 0.0),
+                  ('E', 90.0),
+                  ('S', 180.0),
+                  ('W', 270.0),
+                ])
+                  AppPill(
+                    label: item.$1,
+                    selected: _heading == item.$2,
+                    onTap: () => setState(() => _heading = item.$2),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+
+  Widget _timingQuestions() => SurfaceCard(
+    child: Column(
+      children: [
+        SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: false, label: Text('Ride now')),
+            ButtonSegment(value: true, label: Text('Ride later')),
+          ],
+          selected: {_rideLater},
+          onSelectionChanged: (value) =>
+              setState(() => _rideLater = value.first),
+        ),
+        if (_rideLater) ...[
+          const SizedBox(height: 10),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(
+              Icons.event_outlined,
+              color: MotoMapColors.primary,
+            ),
+            title: Text(
+              _scheduledFor == null
+                  ? 'Choose departure'
+                  : _scheduledFor.toString().substring(0, 16),
+            ),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: _pickSchedule,
+          ),
+        ] else ...[
+          const SizedBox(height: 8),
+          const Text(
+            'Timing begins only when you press Start ride.',
+            style: TextStyle(
+              fontSize: 10,
+              color: MotoMapColors.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ],
+    ),
+  );
+
+  Widget _roadQuestions() => SurfaceCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('ROAD PREFERENCE', style: MotoMapText.labelCaps),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final item in RoutePreference.values)
+              AppPill(
+                label: item.label,
+                selected: item == _preference,
+                onTap: () => setState(() => _preference = item),
+              ),
+          ],
+        ),
+        const Divider(height: 24),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Avoid highways'),
+          value: _avoidHighways,
+          onChanged: (value) => setState(() => _avoidHighways = value),
+        ),
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Avoid tolls'),
+          value: _avoidTolls,
+          onChanged: (value) => setState(() => _avoidTolls = value),
+        ),
+      ],
+    ),
+  );
+}
+
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) => newValue.copyWith(text: newValue.text.toUpperCase());
 }

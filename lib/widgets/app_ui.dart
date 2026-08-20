@@ -4,6 +4,33 @@ import 'package:flutter/material.dart';
 
 import '../theme/motomap_colors.dart';
 
+class MotoMapBrandIcon extends StatelessWidget {
+  const MotoMapBrandIcon({super.key, required this.size, this.radius});
+
+  static const lightAsset = 'assets/branding/motomap_icon_light.jpg';
+  static const darkAsset = 'assets/branding/motomap_icon_dark.jpg';
+
+  final double size;
+  final double? radius;
+
+  @override
+  Widget build(BuildContext context) {
+    // Use the phone's appearance so branding follows the system even while
+    // MotoMap's current interface remains dark-first.
+    final isDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius ?? size * 0.28),
+      child: Image.asset(
+        isDark ? darkAsset : lightAsset,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        filterQuality: FilterQuality.high,
+      ),
+    );
+  }
+}
+
 class MotoMapLogo extends StatelessWidget {
   const MotoMapLogo({super.key, this.compact = false});
 
@@ -14,19 +41,7 @@ class MotoMapLogo extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: compact ? 30 : 36,
-          height: compact ? 30 : 36,
-          decoration: BoxDecoration(
-            color: MotoMapColors.primary,
-            borderRadius: BorderRadius.circular(compact ? 10 : 12),
-          ),
-          child: Icon(
-            Icons.route_rounded,
-            size: compact ? 17 : 20,
-            color: MotoMapColors.onPrimary,
-          ),
-        ),
+        MotoMapBrandIcon(size: compact ? 30 : 36, radius: compact ? 10 : 12),
         const SizedBox(width: 10),
         Text(
           'MotoMap',

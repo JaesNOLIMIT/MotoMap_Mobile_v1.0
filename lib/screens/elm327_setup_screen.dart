@@ -68,7 +68,8 @@ class _Elm327SetupScreenState extends State<Elm327SetupScreen>
     );
 
     try {
-      await Elm327Service.instance.connectToMotorcycle(configured);
+      await WidgetsBinding.instance.endOfFrame;
+      await Elm327Service.instance.reconnectToMotorcycle(configured);
       await MotorcycleService.instance.saveElmAdapter(
         motorcycleId: widget.motorcycle.id,
         deviceName: device.name,
@@ -138,7 +139,9 @@ class _Elm327SetupScreenState extends State<Elm327SetupScreen>
       appBar: AppBar(
         leading: IconButton(
           tooltip: 'Close',
-          onPressed: () => Navigator.pop(context, _complete),
+          onPressed: _connecting
+              ? null
+              : () => Navigator.pop(context, _complete),
           icon: const Icon(Icons.close_rounded),
         ),
         title: const Text('Setup Adapter'),
@@ -146,7 +149,7 @@ class _Elm327SetupScreenState extends State<Elm327SetupScreen>
         actions: [
           IconButton(
             tooltip: 'Setup help',
-            onPressed: _showHelp,
+            onPressed: _connecting ? null : _showHelp,
             icon: const Icon(Icons.help_outline_rounded),
           ),
         ],
@@ -158,11 +161,22 @@ class _Elm327SetupScreenState extends State<Elm327SetupScreen>
             top: false,
             child: Column(
               children: [
-                _SetupProgress(complete: _complete),
+                _SetupProgress(
+                  currentStep: _connecting
+                      ? 1
+                      : _complete && Elm327Service.instance.ecuAvailable
+                      ? 2
+                      : _complete
+                      ? 1
+                      : 0,
+                ),
                 Expanded(
-                  child: _complete
+                  child: _connecting
+                      ? _VerificationBody(motorcycle: widget.motorcycle)
+                      : _complete
                       ? _ConnectionResult(
                           motorcycle: widget.motorcycle,
+                          onRetry: _connectSelected,
                           onChooseAnother: _chooseAnother,
                           onDone: () => Navigator.pop(context, true),
                         )
@@ -196,9 +210,9 @@ class _Elm327SetupScreenState extends State<Elm327SetupScreen>
 }
 
 class _SetupProgress extends StatelessWidget {
-  const _SetupProgress({required this.complete});
+  const _SetupProgress({required this.currentStep});
 
-  final bool complete;
+  final int currentStep;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -211,7 +225,7 @@ class _SetupProgress extends StatelessWidget {
               duration: const Duration(milliseconds: 250),
               height: 3,
               decoration: BoxDecoration(
-                color: index == 0 || complete
+                color: index <= currentStep
                     ? MotoMapColors.primary
                     : MotoMapColors.outlineVariant,
                 borderRadius: BorderRadius.circular(99),
@@ -222,6 +236,65 @@ class _SetupProgress extends StatelessWidget {
         ],
       ],
     ),
+  );
+}
+
+class _VerificationBody extends StatelessWidget {
+  const _VerificationBody({required this.motorcycle});
+
+  final Motorcycle motorcycle;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Elm327Service.instance,
+    builder: (context, _) {
+      final elm = Elm327Service.instance;
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(20, 34, 20, 24),
+        children: [
+          const Center(
+            child: SizedBox(
+              width: 64,
+              height: 64,
+              child: CircularProgressIndicator(strokeWidth: 4),
+            ),
+          ),
+          const SizedBox(height: 22),
+          Text(
+            'Verifying connection',
+            textAlign: TextAlign.center,
+            style: MotoMapText.headlineMd,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'MotoMap is checking the ELM327 and requesting one valid response '
+            'from ${motorcycle.displayName}.',
+            textAlign: TextAlign.center,
+            style: MotoMapText.bodyMd.copyWith(
+              color: MotoMapColors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 26),
+          SurfaceCard(
+            child: Column(
+              children: [
+                _ConnectionRow(
+                  label: 'ELM327',
+                  value: elm.adapterConnected ? 'CONNECTED' : 'CONNECTING',
+                  online: elm.adapterConnected,
+                ),
+                const Divider(height: 24),
+                _ConnectionRow(
+                  label: 'Motorcycle ECU',
+                  value: elm.ecuAvailable ? 'CONNECTED' : 'CHECKING',
+                  online: elm.ecuAvailable,
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    },
   );
 }
 
@@ -426,7 +499,7 @@ class _ScannerBody extends StatelessWidget {
                           selected:
                               selectedDevice?.identifier == device.identifier &&
                               selectedDevice?.transport == device.transport,
-                          enabled: !connecting,
+                          enabled: !connecting && device.isAvailable,
                           onTap: () => onSelected(device),
                         ),
                     ],
@@ -563,11 +636,13 @@ class _DeviceTile extends StatelessWidget {
 class _ConnectionResult extends StatelessWidget {
   const _ConnectionResult({
     required this.motorcycle,
+    required this.onRetry,
     required this.onChooseAnother,
     required this.onDone,
   });
 
   final Motorcycle motorcycle;
+  final VoidCallback onRetry;
   final VoidCallback onChooseAnother;
   final VoidCallback onDone;
 
@@ -643,7 +718,19 @@ class _ConnectionResult extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        PrimaryButton(label: 'Done', onPressed: onDone),
+        PrimaryButton(
+          label: ecuOnline ? 'Done' : 'Retry ECU connection',
+          icon: ecuOnline ? null : Icons.refresh_rounded,
+          onPressed: ecuOnline ? onDone : onRetry,
+        ),
+        if (!ecuOnline) ...[
+          const SizedBox(height: 10),
+          PrimaryButton(
+            label: 'Done for now',
+            secondary: true,
+            onPressed: onDone,
+          ),
+        ],
         const SizedBox(height: 10),
         PrimaryButton(
           label: 'Choose another adapter',

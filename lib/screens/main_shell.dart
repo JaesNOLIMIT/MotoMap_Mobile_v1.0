@@ -23,6 +23,7 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   late int _index = widget.initialIndex;
+  int _planSession = 0;
 
   static const _items = [
     (Icons.home_outlined, Icons.home_rounded, 'Home'),
@@ -50,12 +51,22 @@ class _MainShellState extends State<MainShell> {
     unawaited(Elm327Service.instance.refreshReconnectMotorcycle());
   }
 
+  void _selectTab(int index) {
+    setState(() {
+      if (index == 2 && _index != 2) _planSession++;
+      _index = index;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      HomeScreen(onOpenDiscover: () => setState(() => _index = 1)),
+      HomeScreen(onOpenDiscover: () => _selectTab(1)),
       const DiscoverScreen(),
-      PlanScreen(onOpenRides: () => setState(() => _index = 3)),
+      PlanScreen(
+        key: ValueKey('plan-$_planSession'),
+        onOpenRides: () => _selectTab(3),
+      ),
       const RidesScreen(),
       const ProfileScreen(),
     ];
@@ -100,7 +111,7 @@ class _MainShellState extends State<MainShell> {
                         selected: selected,
                         label: item.$3,
                         child: InkWell(
-                          onTap: () => setState(() => _index = index),
+                          onTap: () => _selectTab(index),
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [

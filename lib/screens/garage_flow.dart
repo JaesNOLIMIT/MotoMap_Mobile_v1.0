@@ -418,7 +418,21 @@ class _MotorcycleDetailScreenState extends State<MotorcycleDetailScreen> {
         builder: (_) => Elm327SetupScreen(motorcycle: motorcycle),
       ),
     );
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    try {
+      final refreshed = await MotorcycleService.instance.fetchMotorcycle(
+        motorcycle.id,
+      );
+      if (!mounted) return;
+      setState(() {
+        _motorcycleOverride = refreshed;
+        _storedData = _fetchStoredData();
+      });
+    } catch (error) {
+      if (mounted) {
+        showAppMessage(context, 'Could not refresh motorcycle: $error');
+      }
+    }
   }
 
   void _showHistoryDetails(DiagnosticHistoryEntry entry) {
@@ -2236,6 +2250,22 @@ class _SystemDiagnosticsScreenState extends State<SystemDiagnosticsScreen> {
   DiagnosticReport? report;
   String? scanError;
 
+  @override
+  void initState() {
+    super.initState();
+    Elm327Service.instance.addListener(_elmChanged);
+  }
+
+  @override
+  void dispose() {
+    Elm327Service.instance.removeListener(_elmChanged);
+    super.dispose();
+  }
+
+  void _elmChanged() {
+    if (mounted) setState(() {});
+  }
+
   Future<void> _scan() async {
     setState(() {
       scanning = true;
@@ -2247,7 +2277,12 @@ class _SystemDiagnosticsScreenState extends State<SystemDiagnosticsScreen> {
       if (!bike.hasElmAdapter) {
         throw StateError('Connect an ELM327 adapter to this motorcycle first.');
       }
-      await Elm327Service.instance.connectToMotorcycle(bike);
+      final elm = Elm327Service.instance;
+      if (elm.motorcycle?.id != bike.id || !elm.ecuAvailable) {
+        await elm.reconnectToMotorcycle(bike);
+      } else {
+        await elm.connectToMotorcycle(bike);
+      }
       final result = await Elm327Service.instance.runDiagnostic(
         type: DiagnosticSessionType.preRide,
       );
@@ -2265,6 +2300,15 @@ class _SystemDiagnosticsScreenState extends State<SystemDiagnosticsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final selectedBike = widget.motorcycle ?? Elm327Service.instance.motorcycle;
+    final elm = Elm327Service.instance;
+    final sameBike =
+        selectedBike != null && elm.motorcycle?.id == selectedBike.id;
+    final connectionLabel = !sameBike || !elm.adapterConnected
+        ? 'ELM327 not connected'
+        : elm.ecuAvailable
+        ? 'ECU connected'
+        : 'ELM327 connected · ECU not connected';
     return _CenteredPage(
       child: Scaffold(
         appBar: AppBar(title: const Text('System diagnostics')),
@@ -2317,7 +2361,7 @@ class _SystemDiagnosticsScreenState extends State<SystemDiagnosticsScreen> {
                     scanning
                         ? 'Reading supported ECU sensors and trouble codes'
                         : report == null
-                        ? Elm327Service.instance.statusLabel
+                        ? connectionLabel
                         : report!.issues.isEmpty
                         ? 'No issues were detected in the supported ECU data.'
                         : report!.issues.join(' '),

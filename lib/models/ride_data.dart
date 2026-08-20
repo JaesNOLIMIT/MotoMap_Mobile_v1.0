@@ -24,6 +24,23 @@ class PlaceResult {
   final MapPoint location;
 }
 
+class RouteWaypoint {
+  const RouteWaypoint({required this.name, required this.location});
+
+  final String name;
+  final MapPoint location;
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'location': location.toCoordinateJson(),
+  };
+
+  factory RouteWaypoint.fromJson(Map<String, dynamic> json) => RouteWaypoint(
+    name: json['name'] as String? ?? 'Stop',
+    location: MapPoint.fromCoordinateJson(json['location']),
+  );
+}
+
 enum RoutePreference { fastest, balanced, scenic, curvy }
 
 extension RoutePreferenceValue on RoutePreference {
@@ -104,6 +121,18 @@ class GeneratedRoute {
   final List<RouteManeuver> maneuvers;
 }
 
+class RouteAlternative {
+  const RouteAlternative({
+    required this.route,
+    required this.preference,
+    required this.label,
+  });
+
+  final GeneratedRoute route;
+  final RoutePreference preference;
+  final String label;
+}
+
 class RoutePlan {
   const RoutePlan({
     required this.id,
@@ -126,6 +155,11 @@ class RoutePlan {
     this.requestedDistanceKm,
     this.requestedDurationMinutes,
     this.scheduledFor,
+    this.motorcycleId,
+    this.waypoints = const [],
+    this.departureMode = 'now',
+    this.avoidHighways = false,
+    this.avoidTolls = false,
   });
 
   final String id;
@@ -146,6 +180,11 @@ class RoutePlan {
   final List<MapPoint> coordinates;
   final List<RouteManeuver> maneuvers;
   final DateTime? scheduledFor;
+  final String? motorcycleId;
+  final List<RouteWaypoint> waypoints;
+  final String departureMode;
+  final bool avoidHighways;
+  final bool avoidTolls;
   final String status;
   final DateTime createdAt;
 
@@ -182,8 +221,48 @@ class RoutePlan {
       'geometry_precision': 6,
     },
     'scheduled_for': scheduledFor?.toUtc().toIso8601String(),
+    'motorcycle_id': motorcycleId,
+    'waypoints': waypoints.map((stop) => stop.toJson()).toList(growable: false),
+    'departure_mode': departureMode,
+    'avoid_highways': avoidHighways,
+    'avoid_tolls': avoidTolls,
     'status': status,
   };
+
+  RoutePlan copyWithRoute({
+    required GeneratedRoute route,
+    RoutePreference? preference,
+    List<RouteWaypoint>? waypoints,
+    String? motorcycleId,
+    bool? avoidHighways,
+    bool? avoidTolls,
+  }) => RoutePlan(
+    id: id,
+    userId: userId,
+    title: title,
+    source: source,
+    prompt: prompt,
+    originName: originName,
+    origin: route.origin,
+    destinationName: destinationName,
+    destination: route.destination,
+    isLoop: isLoop,
+    requestedDistanceKm: requestedDistanceKm,
+    requestedDurationMinutes: requestedDurationMinutes,
+    preference: preference ?? this.preference,
+    distanceKm: route.distanceKm,
+    durationSeconds: route.durationSeconds,
+    coordinates: route.coordinates,
+    maneuvers: route.maneuvers,
+    scheduledFor: scheduledFor,
+    status: status,
+    createdAt: createdAt,
+    motorcycleId: motorcycleId ?? this.motorcycleId,
+    waypoints: waypoints ?? this.waypoints,
+    departureMode: departureMode,
+    avoidHighways: avoidHighways ?? this.avoidHighways,
+    avoidTolls: avoidTolls ?? this.avoidTolls,
+  );
 
   factory RoutePlan.fromJson(Map<String, dynamic> json) => RoutePlan(
     id: json['route_plan_id'] as String,
@@ -222,6 +301,16 @@ class RoutePlan {
     scheduledFor: json['scheduled_for'] == null
         ? null
         : DateTime.parse(json['scheduled_for'] as String),
+    motorcycleId: json['motorcycle_id'] as String?,
+    waypoints: (json['waypoints'] as List<dynamic>? ?? const [])
+        .map(
+          (item) =>
+              RouteWaypoint.fromJson(Map<String, dynamic>.from(item as Map)),
+        )
+        .toList(growable: false),
+    departureMode: json['departure_mode'] as String? ?? 'now',
+    avoidHighways: json['avoid_highways'] as bool? ?? false,
+    avoidTolls: json['avoid_tolls'] as bool? ?? false,
     status: json['status'] as String? ?? 'planned',
     createdAt: DateTime.parse(json['created_at'] as String),
   );

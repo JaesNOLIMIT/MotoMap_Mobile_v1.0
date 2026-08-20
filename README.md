@@ -44,6 +44,11 @@ service is required for guaranteed reconnect attempts while the UI process is
 not running. Force-stopping an Android app always disables background work until
 the user opens it again.
 
+Setup now has three truthful stages: device selection, real ELM327/ECU
+verification, and the result. Android GATT error 133 is retried automatically.
+If Bluetooth connects but the ECU does not answer, MotoMap keeps those states
+separate and offers **Retry ECU connection** or another-adapter selection.
+
 The current diagnostic layer initializes the adapter, auto-detects the ECU
 protocol, discovers supported Mode 01 PIDs, reads live values, reads and clears
 generic Mode 03/04 trouble codes, stores diagnostic history in Supabase, and
@@ -92,6 +97,13 @@ labels, route and health scores, and an updated motorcycle usage summary. The
 migration is applied to the linked Moto Map project. All four new tables have
 RLS enabled with owner-scoped select, insert, update, and delete policies.
 
+`20260820144002_fix_diagnostic_session_timestamps_and_route_removal.sql` uses
+server time when a diagnostic is completed, preventing phone clock drift from
+violating the diagnostic date constraint. The follow-up
+`20260820151454_use_server_time_for_elm_connections.sql` makes the latest ELM
+connection ordering server-authoritative. Both migrations are already applied
+to the linked project.
+
 ## Motorcycle catalog and real ride history
 
 The add-motorcycle form can search the official NHTSA vPIC JSON API for
@@ -125,6 +137,32 @@ The smart prompt planner is deterministic and free: it extracts destination,
 loop distance, duration, and road style, then asks Valhalla for a real route. It
 does not claim to be a generative AI model and requires no paid AI key.
 
+Saved plans can be swiped right to archive or left to permanently delete after
+confirmation. The Archived view supports swipe-right restore. Deleting a saved
+plan does not delete a completed ride that previously used it.
+
+## Phase 3 pre-ride planning
+
+Plan begins with four distinct choices: AI Ride Planner, Destination, Loop, and
+Surprise. Each opens a focused question screen. Ride Now starts its clock only
+when **Start ride** is pressed; Ride Later stores a real departure date/time.
+The preview follows the Map, Details, Motorcycle, and optional Group tab flow:
+
+- Map shows up to three real preference-based routes when meaningfully
+  different routes are available and explains when no alternative exists.
+- Details changes road character, avoids highways/tolls, searches ordered
+  stops, and accepts a pinned map endpoint before rebuilding the real route.
+- Motorcycle selects the bike, keeps ELM327 optional, distinguishes adapter
+  and ECU state, and can run a saved pre-ride fault/danger check.
+- Group creates or joins a private six-character uppercase code and reveals
+  only joined rider/motorcycle preview data. Live group controls remain a
+  separate in-ride phase.
+
+Shared preview tables use RLS, explicit Data API grants, member-safe profile
+snapshots, and a code-only join RPC. The migrations beginning with
+`20260820154257_create_private_shared_ride_previews.sql` are already applied to
+the linked Supabase project.
+
 Ride recording starts only after the rider presses **Start ride**. It records
 precise GPS points, elapsed time, moving time, manual pause intervals, route
 progress, available ELM327 readings, and turn-by-turn voice guidance. Reaching
@@ -135,5 +173,34 @@ returns. Force-quitting an app stops operating-system background execution.
 
 Android MapLibre builds require Java 21 and NDK `28.1.13356709`. This workspace
 uses the portable JDK at `C:\Adrian\Tools\temurin-jdk21\jdk-21.0.12+8`; Gradle
-installed the required side-by-side NDK automatically. Android and iOS riders
-must grant precise/background location permission for locked-screen recording.
+installed the required side-by-side NDK automatically. Android riders can start
+with **While using the app** location permission; MotoMap's active-ride location
+notification keeps the foreground recording service running. Android exposes
+**Allow all the time** only through App Settings on many devices, so MotoMap no
+longer blocks Start when that option is absent. iOS background availability
+still depends on the granted system mode.
+
+## Install the latest Android APK
+
+The two source icons are organized under `assets/branding/`. MotoMap selects
+the light or dark in-app icon from the phone appearance. Android launcher icon
+resources also include normal and night-mode versions; a launcher may cache
+its icon until it refreshes.
+
+For the first installation, enable **Developer options** and **USB debugging**
+on the Android phone, connect it by USB, and accept the phone's RSA prompt.
+After any code change, build and install the latest update with one command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tool\install_updated_apk.ps1
+```
+
+If more than one Android device is connected, add its Flutter device ID:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tool\install_updated_apk.ps1 -DeviceId YOUR_DEVICE_ID
+```
+
+The update preserves login and local app data because it installs over the
+existing app. Do not uninstall first unless Android reports an incompatible
+signature, because uninstalling removes the app's local data.

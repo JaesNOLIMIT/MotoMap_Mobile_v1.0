@@ -16,11 +16,12 @@ class PlannedRidesTab extends StatefulWidget {
 
 class _PlannedRidesTabState extends State<PlannedRidesTab> {
   late Future<List<RoutePlan>> _plans;
+  bool _showArchived = false;
 
   @override
   void initState() {
     super.initState();
-    _plans = RideRepository.instance.fetchPlannedRoutes();
+    _plans = _loadRoutes();
     RideRepository.instance.changes.addListener(_refresh);
   }
 
@@ -32,113 +33,298 @@ class _PlannedRidesTabState extends State<PlannedRidesTab> {
 
   void _refresh() {
     if (mounted) {
-      setState(() => _plans = RideRepository.instance.fetchPlannedRoutes());
+      setState(() => _plans = _loadRoutes());
     }
+  }
+
+  Future<List<RoutePlan>> _loadRoutes() => _showArchived
+      ? RideRepository.instance.fetchArchivedRoutes()
+      : RideRepository.instance.fetchPlannedRoutes();
+
+  void _showStatus(bool archived) {
+    if (_showArchived == archived) return;
+    setState(() {
+      _showArchived = archived;
+      _plans = _loadRoutes();
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<RoutePlan>>(
-      future: _plans,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return _DataState(
-            icon: Icons.cloud_off_outlined,
-            title: 'Plans unavailable',
-            message: _friendlyError(snapshot.error!),
-            action: 'Retry',
-            onAction: _refresh,
-          );
-        }
-        final plans = snapshot.data ?? const [];
-        if (plans.isEmpty) {
-          return const _DataState(
-            icon: Icons.route_outlined,
-            title: 'No planned rides yet',
-            message:
-                'Use Plan to search a destination or generate a loop. Saved routes will appear here.',
-          );
-        }
-        return RefreshIndicator(
-          onRefresh: () async => _refresh(),
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
-            itemCount: plans.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (context, index) {
-              final plan = plans[index];
-              return SurfaceCard(
-                onTap: () => Navigator.of(context)
-                    .push(
-                      MaterialPageRoute(
-                        builder: (_) => RouteDetailScreen(plan: plan),
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+          child: Row(
+            children: [
+              AppPill(
+                label: 'PLANNED',
+                selected: !_showArchived,
+                onTap: () => _showStatus(false),
+              ),
+              const SizedBox(width: 8),
+              AppPill(
+                label: 'ARCHIVED',
+                icon: Icons.archive_outlined,
+                selected: _showArchived,
+                onTap: () => _showStatus(true),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _showArchived
+                      ? 'Swipe right to restore'
+                      : 'Right archive · Left delete',
+                  maxLines: 2,
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                    fontSize: 8,
+                    color: MotoMapColors.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder<List<RoutePlan>>(
+            future: _plans,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return _DataState(
+                  icon: Icons.cloud_off_outlined,
+                  title: 'Plans unavailable',
+                  message: _friendlyError(snapshot.error!),
+                  action: 'Retry',
+                  onAction: _refresh,
+                );
+              }
+              final plans = snapshot.data ?? const [];
+              if (plans.isEmpty) {
+                return _DataState(
+                  icon: Icons.route_outlined,
+                  title: _showArchived
+                      ? 'No archived rides'
+                      : 'No planned rides yet',
+                  message: _showArchived
+                      ? 'Swipe right on a planned ride to archive it.'
+                      : 'Use Plan to search a destination or generate a loop. Saved routes will appear here.',
+                );
+              }
+              return RefreshIndicator(
+                onRefresh: () async => _refresh(),
+                child: ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+                  itemCount: plans.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
+                  itemBuilder: (context, index) {
+                    final plan = plans[index];
+                    return Dismissible(
+                      key: ValueKey(plan.id),
+                      background: _SwipeActionBackground(
+                        alignment: Alignment.centerLeft,
+                        color: MotoMapColors.warning,
+                        icon: _showArchived
+                            ? Icons.unarchive_outlined
+                            : Icons.archive_outlined,
+                        label: _showArchived ? 'RESTORE' : 'ARCHIVE',
                       ),
-                    )
-                    .then((_) => _refresh()),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(
-                        color: MotoMapColors.primary.withValues(alpha: 0.13),
-                        borderRadius: BorderRadius.circular(14),
+                      secondaryBackground: const _SwipeActionBackground(
+                        alignment: Alignment.centerRight,
+                        color: MotoMapColors.error,
+                        icon: Icons.delete_forever_outlined,
+                        label: 'DELETE',
                       ),
-                      child: Icon(
-                        plan.isLoop
-                            ? Icons.loop_rounded
-                            : Icons.location_on_outlined,
-                        color: MotoMapColors.primary,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            plan.title,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
+                      confirmDismiss: (direction) =>
+                          _confirmRouteAction(plan, direction),
+                      onDismissed: (_) =>
+                          RideRepository.instance.notifyRefresh(),
+                      child: SurfaceCard(
+                        onTap: () => Navigator.of(context)
+                            .push(
+                              MaterialPageRoute(
+                                builder: (_) => RouteDetailScreen(plan: plan),
+                              ),
+                            )
+                            .then((_) => _refresh()),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 52,
+                              height: 52,
+                              decoration: BoxDecoration(
+                                color: MotoMapColors.primary.withValues(
+                                  alpha: 0.13,
+                                ),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Icon(
+                                plan.isLoop
+                                    ? Icons.loop_rounded
+                                    : Icons.location_on_outlined,
+                                color: MotoMapColors.primary,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '${plan.distanceKm.toStringAsFixed(1)} km · '
-                            '${_formatDuration(plan.duration)} · '
-                            '${plan.preference.label}',
-                            style: const TextStyle(
-                              fontSize: 9,
-                              color: MotoMapColors.onSurfaceVariant,
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    plan.title,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${plan.distanceKm.toStringAsFixed(1)} km · '
+                                    '${_formatDuration(plan.duration)} · '
+                                    '${plan.preference.label}',
+                                    style: const TextStyle(
+                                      fontSize: 9,
+                                      color: MotoMapColors.onSurfaceVariant,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    plan.destinationName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 9,
+                                      color: MotoMapColors.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            plan.destinationName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 9,
-                              color: MotoMapColors.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
+                            const Icon(Icons.chevron_right_rounded),
+                          ],
+                        ),
                       ),
-                    ),
-                    const Icon(Icons.chevron_right_rounded),
-                  ],
+                    );
+                  },
                 ),
               );
             },
           ),
-        );
-      },
+        ),
+      ],
     );
   }
+
+  Future<bool> _confirmRouteAction(
+    RoutePlan plan,
+    DismissDirection direction,
+  ) async {
+    final deleting = direction == DismissDirection.endToStart;
+    final restoring = _showArchived && !deleting;
+    if (deleting) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Delete saved ride?'),
+          content: Text(
+            '“${plan.title}” will be permanently removed. Completed ride '
+            'history will not be deleted.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: FilledButton.styleFrom(
+                backgroundColor: MotoMapColors.error,
+              ),
+              child: const Text('Delete permanently'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return false;
+    }
+    try {
+      if (deleting) {
+        await RideRepository.instance.deleteRoute(plan.id, notify: false);
+      } else if (restoring) {
+        await RideRepository.instance.restoreRoute(plan.id, notify: false);
+      } else {
+        await RideRepository.instance.archiveRoute(plan.id, notify: false);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              deleting
+                  ? 'Saved ride deleted.'
+                  : restoring
+                  ? 'Saved ride restored.'
+                  : 'Saved ride archived.',
+            ),
+          ),
+        );
+      }
+      return true;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Could not ${deleting
+                  ? 'delete'
+                  : restoring
+                  ? 'restore'
+                  : 'archive'} saved ride: $error',
+            ),
+          ),
+        );
+      }
+      return false;
+    }
+  }
+}
+
+class _SwipeActionBackground extends StatelessWidget {
+  const _SwipeActionBackground({
+    required this.alignment,
+    required this.color,
+    required this.icon,
+    required this.label,
+  });
+
+  final Alignment alignment;
+  final Color color;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    alignment: alignment,
+    padding: const EdgeInsets.symmetric(horizontal: 22),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: color.withValues(alpha: 0.5)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: color),
+        const SizedBox(width: 7),
+        Text(
+          label,
+          style: TextStyle(color: color, fontWeight: FontWeight.w900),
+        ),
+      ],
+    ),
+  );
 }
 
 class CompletedRidesTab extends StatefulWidget {

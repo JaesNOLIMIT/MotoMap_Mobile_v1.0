@@ -38,6 +38,11 @@ class RideRepository {
     double? requestedDistanceKm,
     int? requestedDurationMinutes,
     DateTime? scheduledFor,
+    String? motorcycleId,
+    List<RouteWaypoint> waypoints = const [],
+    String departureMode = 'now',
+    bool avoidHighways = false,
+    bool avoidTolls = false,
   }) async {
     final plan = RoutePlan(
       id: _uuid.v4(),
@@ -58,12 +63,61 @@ class RideRepository {
       coordinates: route.coordinates,
       maneuvers: route.maneuvers,
       scheduledFor: scheduledFor,
+      motorcycleId: motorcycleId,
+      waypoints: waypoints,
+      departureMode: departureMode,
+      avoidHighways: avoidHighways,
+      avoidTolls: avoidTolls,
       status: 'planned',
       createdAt: DateTime.now().toUtc(),
     );
     final row = await _client
         .from('route_plans')
         .insert(plan.toDatabaseJson())
+        .select()
+        .single();
+    changes.value++;
+    return RoutePlan.fromJson(row);
+  }
+
+  Future<RoutePlan> updateRoutePlan(
+    RoutePlan plan, {
+    required GeneratedRoute route,
+    required RoutePreference preference,
+    required List<RouteWaypoint> waypoints,
+    required bool avoidHighways,
+    required bool avoidTolls,
+    String? motorcycleId,
+    String? originName,
+    String? destinationName,
+  }) async {
+    final row = await _client
+        .from('route_plans')
+        .update({
+          'origin_latitude': route.origin.latitude,
+          'origin_longitude': route.origin.longitude,
+          if (originName != null) 'origin_name': originName,
+          'destination_latitude': route.destination.latitude,
+          'destination_longitude': route.destination.longitude,
+          if (destinationName != null) 'destination_name': destinationName,
+          'route_preference': preference.databaseValue,
+          'distance_km': route.distanceKm,
+          'duration_seconds': route.durationSeconds,
+          'route_coordinates': route.coordinates
+              .map((point) => point.toCoordinateJson())
+              .toList(growable: false),
+          'maneuvers': route.maneuvers
+              .map((maneuver) => maneuver.toJson())
+              .toList(growable: false),
+          'waypoints': waypoints
+              .map((waypoint) => waypoint.toJson())
+              .toList(growable: false),
+          'avoid_highways': avoidHighways,
+          'avoid_tolls': avoidTolls,
+          'motorcycle_id': motorcycleId,
+        })
+        .eq('route_plan_id', plan.id)
+        .eq('user_id', _userId)
         .select()
         .single();
     changes.value++;
@@ -82,13 +136,51 @@ class RideRepository {
     return rows.map(RoutePlan.fromJson).toList(growable: false);
   }
 
-  Future<void> archiveRoute(String routePlanId) async {
+  Future<RoutePlan> fetchRoutePlan(String routePlanId) async {
+    final row = await _client
+        .from('route_plans')
+        .select()
+        .eq('route_plan_id', routePlanId)
+        .single();
+    return RoutePlan.fromJson(row);
+  }
+
+  Future<List<RoutePlan>> fetchArchivedRoutes({int limit = 100}) async {
+    final rows = await _client
+        .from('route_plans')
+        .select()
+        .eq('user_id', _userId)
+        .eq('status', 'archived')
+        .order('updated_at', ascending: false)
+        .limit(limit);
+    return rows.map(RoutePlan.fromJson).toList(growable: false);
+  }
+
+  Future<void> archiveRoute(String routePlanId, {bool notify = true}) async {
     await _client
         .from('route_plans')
         .update({'status': 'archived'})
         .eq('route_plan_id', routePlanId)
         .eq('user_id', _userId);
-    changes.value++;
+    if (notify) changes.value++;
+  }
+
+  Future<void> deleteRoute(String routePlanId, {bool notify = true}) async {
+    await _client
+        .from('route_plans')
+        .delete()
+        .eq('route_plan_id', routePlanId)
+        .eq('user_id', _userId);
+    if (notify) changes.value++;
+  }
+
+  Future<void> restoreRoute(String routePlanId, {bool notify = true}) async {
+    await _client
+        .from('route_plans')
+        .update({'status': 'planned'})
+        .eq('route_plan_id', routePlanId)
+        .eq('user_id', _userId);
+    if (notify) changes.value++;
   }
 
   Future<RideRecord> startRide({

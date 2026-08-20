@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -13,8 +14,13 @@ class MotoMapView extends StatefulWidget {
     this.traveled = const [],
     this.currentLocation,
     this.followLocation = false,
+    this.followBearing = false,
     this.interactive = true,
+    this.markers = const [],
+    this.onMapTap,
+    this.onMapLongPress,
     this.onControllerReady,
+    this.onTrackingDismissed,
     super.key,
   });
 
@@ -22,8 +28,13 @@ class MotoMapView extends StatefulWidget {
   final List<MapPoint> traveled;
   final MapPoint? currentLocation;
   final bool followLocation;
+  final bool followBearing;
   final bool interactive;
+  final List<MapPoint> markers;
+  final ValueChanged<MapPoint>? onMapTap;
+  final ValueChanged<MapPoint>? onMapLongPress;
   final ValueChanged<MapLibreMapController>? onControllerReady;
+  final VoidCallback? onTrackingDismissed;
 
   @override
   State<MotoMapView> createState() => _MotoMapViewState();
@@ -34,6 +45,8 @@ class _MotoMapViewState extends State<MotoMapView> {
   Line? _routeLine;
   Line? _traveledLine;
   Circle? _destinationCircle;
+  final List<Circle> _markerCircles = [];
+  final List<Symbol> _directionSymbols = [];
   bool _styleLoaded = false;
 
   MapPoint get _initialPoint =>
@@ -47,7 +60,8 @@ class _MotoMapViewState extends State<MotoMapView> {
     super.didUpdateWidget(oldWidget);
     if (_styleLoaded &&
         (oldWidget.route != widget.route ||
-            oldWidget.traveled.length != widget.traveled.length)) {
+            oldWidget.traveled.length != widget.traveled.length ||
+            oldWidget.markers != widget.markers)) {
       unawaited(_drawLines());
     }
     if (widget.followLocation &&
@@ -84,6 +98,16 @@ class _MotoMapViewState extends State<MotoMapView> {
             _controller = controller;
             widget.onControllerReady?.call(controller);
           },
+          onCameraTrackingDismissed: widget.onTrackingDismissed,
+          onMapClick: widget.onMapTap == null
+              ? null
+              : (_, point) =>
+                    widget.onMapTap!(MapPoint(point.latitude, point.longitude)),
+          onMapLongClick: widget.onMapLongPress == null
+              ? null
+              : (_, point) => widget.onMapLongPress!(
+                  MapPoint(point.latitude, point.longitude),
+                ),
           onStyleLoadedCallback: () {
             _styleLoaded = true;
             unawaited(_drawLines());
@@ -92,7 +116,9 @@ class _MotoMapViewState extends State<MotoMapView> {
           myLocationEnabled:
               widget.followLocation || widget.currentLocation != null,
           myLocationTrackingMode: widget.followLocation
-              ? MyLocationTrackingMode.trackingGps
+              ? widget.followBearing
+                    ? MyLocationTrackingMode.trackingCompass
+                    : MyLocationTrackingMode.trackingGps
               : MyLocationTrackingMode.none,
           compassEnabled: true,
           rotateGesturesEnabled: widget.interactive,
@@ -119,6 +145,14 @@ class _MotoMapViewState extends State<MotoMapView> {
       await controller.removeCircle(_destinationCircle!);
       _destinationCircle = null;
     }
+    if (_markerCircles.isNotEmpty) {
+      await controller.removeCircles(_markerCircles);
+      _markerCircles.clear();
+    }
+    if (_directionSymbols.isNotEmpty) {
+      await controller.removeSymbols(_directionSymbols);
+      _directionSymbols.clear();
+    }
     if (widget.route.length >= 2) {
       _routeLine = await controller.addLine(
         LineOptions(
@@ -136,6 +170,37 @@ class _MotoMapViewState extends State<MotoMapView> {
           circleRadius: 7,
           circleStrokeColor: '#FFF4EF',
           circleStrokeWidth: 2,
+        ),
+      );
+      final step = math.max(8, widget.route.length ~/ 12);
+      for (var index = step; index < widget.route.length - 1; index += step) {
+        final point = widget.route[index];
+        final next = widget.route[index + 1];
+        _directionSymbols.add(
+          await controller.addSymbol(
+            SymbolOptions(
+              geometry: _latLng(point),
+              textField: '➤',
+              textSize: 15,
+              textRotate: _bearing(point, next) - 90,
+              textColor: '#FFF4EF',
+              textHaloColor: '#FF673D',
+              textHaloWidth: 2.5,
+            ),
+          ),
+        );
+      }
+    }
+    for (final marker in widget.markers) {
+      _markerCircles.add(
+        await controller.addCircle(
+          CircleOptions(
+            geometry: _latLng(marker),
+            circleColor: '#FFD166',
+            circleRadius: 6,
+            circleStrokeColor: '#111814',
+            circleStrokeWidth: 2,
+          ),
         ),
       );
     }
@@ -191,4 +256,17 @@ class _MotoMapViewState extends State<MotoMapView> {
 
   static LatLng _latLng(MapPoint point) =>
       LatLng(point.latitude, point.longitude);
+
+  static double _bearing(MapPoint from, MapPoint to) {
+    final fromLatitude = from.latitude * math.pi / 180;
+    final toLatitude = to.latitude * math.pi / 180;
+    final longitudeDelta = (to.longitude - from.longitude) * math.pi / 180;
+    final y = math.sin(longitudeDelta) * math.cos(toLatitude);
+    final x =
+        math.cos(fromLatitude) * math.sin(toLatitude) -
+        math.sin(fromLatitude) *
+            math.cos(toLatitude) *
+            math.cos(longitudeDelta);
+    return (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+  }
 }

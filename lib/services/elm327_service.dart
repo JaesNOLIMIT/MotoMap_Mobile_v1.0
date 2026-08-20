@@ -69,6 +69,7 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
   bool _initialized = false;
   bool _manuallyDisconnected = false;
   bool _liveDisplayBusy = false;
+  bool _ecuHandshakeVerified = false;
   int _reconnectAttempt = 0;
 
   ElmConnectionStatus status = ElmConnectionStatus.disconnected;
@@ -85,6 +86,10 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
   String? get activeSessionId => _activeSessionId;
   bool get isConnected =>
       status == ElmConnectionStatus.connected && _transportIsConnected;
+  bool get adapterConnected =>
+      _transportIsConnected &&
+      (status == ElmConnectionStatus.initializing ||
+          status == ElmConnectionStatus.connected);
 
   bool get _transportIsConnected =>
       (_connection?.isConnected ?? false) || (_bleDevice?.isConnected ?? false);
@@ -277,7 +282,11 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
         'Choose a Bluetooth LE adapter on iPhone.',
       );
     }
-    if (isConnected && _motorcycle?.id == motorcycle.id) return;
+    if (isConnected &&
+        _motorcycle?.id == motorcycle.id &&
+        (ecuAvailable || automatic)) {
+      return;
+    }
 
     _motorcycle = motorcycle;
     _manuallyDisconnected = false;
@@ -329,8 +338,13 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
             : ElmConnectionStatus.error,
       );
       _scheduleReconnect();
-      if (!automatic) rethrow;
+      if (!automatic) throw StateError(errorMessage!);
     }
+  }
+
+  Future<void> reconnectToMotorcycle(Motorcycle motorcycle) async {
+    await disconnect(manual: false);
+    await connectToMotorcycle(motorcycle);
   }
 
   Future<void> disconnect({bool manual = true}) async {
@@ -350,6 +364,12 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
     final bike = _motorcycle;
     if (bike == null) throw StateError('Select a primary motorcycle first.');
     if (!isConnected) await connectToMotorcycle(bike);
+    if (!ecuAvailable) {
+      throw StateError(
+        'ELM327 is connected, but the motorcycle ECU did not respond. Turn '
+        'the ignition on, check the diagnostic cable, then retry.',
+      );
+    }
 
     final snapshot = await pollOnce();
     final codes = await readTroubleCodes();
@@ -459,7 +479,7 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
       final value = await _readPid(pid);
       if (value != null) values[pid] = value;
     }
-    ecuAvailable = values.isNotEmpty;
+    ecuAvailable = _ecuHandshakeVerified;
     final snapshot = DiagnosticSnapshot(
       recordedAt: DateTime.now().toUtc(),
       engineRpm: values[0x0C],
@@ -480,6 +500,9 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<List<DiagnosticTroubleCode>> readTroubleCodes() async {
+    if (!ecuAvailable) {
+      throw StateError('The motorcycle ECU is not connected.');
+    }
     final response = await sendCommand(
       '03',
       timeout: const Duration(seconds: 8),
@@ -561,16 +584,20 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
     await sendCommand('ATH0');
     await sendCommand('ATSP0');
     elmVersion = _firstUsefulLine(await sendCommand('ATI'));
-    detectedProtocol = _firstUsefulLine(
-      await sendCommand('ATDP', timeout: const Duration(seconds: 8)),
-    );
     adapterVoltage = parseVoltage(await sendCommand('ATRV'));
     supportedPids = await _readSupportedPids();
-    ecuAvailable = supportedPids.isNotEmpty;
+    ecuAvailable = _ecuHandshakeVerified;
+    final protocol = _firstUsefulLine(
+      await sendCommand('ATDP', timeout: const Duration(seconds: 8)),
+    );
+    detectedProtocol = ecuAvailable && !_isAutomaticProtocol(protocol)
+        ? protocol
+        : null;
   }
 
   Future<Set<int>> _readSupportedPids() async {
     final result = <int>{};
+    _ecuHandshakeVerified = false;
     for (var base = 0x00; base <= 0xC0; base += 0x20) {
       final response = await sendCommand(
         '01${pidHex(base)}',
@@ -578,6 +605,7 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
       );
       final bytes = parseMode01Bytes(response, base);
       if (bytes.length < 4) break;
+      _ecuHandshakeVerified = true;
       final mask =
           (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
       for (var bit = 0; bit < 32; bit++) {
@@ -731,10 +759,27 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     final device = fbp.BluetoothDevice.fromId(identifier);
-    if (!device.isConnected) {
-      await device.connect(timeout: const Duration(seconds: 12), mtu: null);
-    }
     _bleDevice = device;
+    if (!device.isConnected) {
+      Object? lastError;
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await device.connect(timeout: const Duration(seconds: 12), mtu: null);
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!_isRetryableAndroidBleError(error) || attempt == 2) rethrow;
+          try {
+            await device.disconnect(queue: false);
+          } catch (_) {
+            // Android may already consider a failed GATT connection closed.
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+        }
+      }
+      if (lastError != null) throw lastError;
+    }
     final services = await device.discoverServices();
     final characteristics = services
         .expand((service) => service.characteristics)
@@ -866,6 +911,7 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
 
   void _clearLiveData() {
     ecuAvailable = false;
+    _ecuHandshakeVerified = false;
     latestSnapshot = null;
     latestTroubleCodes = const [];
     supportedPids = <int>{};
@@ -1020,8 +1066,28 @@ class Elm327Service extends ChangeNotifier with WidgetsBindingObserver {
     return null;
   }
 
+  static bool _isAutomaticProtocol(String? protocol) {
+    if (protocol == null) return true;
+    final normalized = protocol.trim().toUpperCase();
+    return normalized == 'AUTO' || normalized == 'AUTOMATIC';
+  }
+
+  static bool _isRetryableAndroidBleError(Object error) {
+    if (defaultTargetPlatform != TargetPlatform.android) return false;
+    if (error is fbp.FlutterBluePlusException) {
+      return error.function == 'connect' && error.code == 133;
+    }
+    final text = error.toString().toUpperCase();
+    return text.contains('ANDROID-CODE: 133') ||
+        text.contains('ANDROID_SPECIFIC_ERROR');
+  }
+
   static String _friendlyError(Object error) {
     final text = error.toString().replaceFirst('Exception: ', '');
+    if (_isRetryableAndroidBleError(error)) {
+      return 'Android dropped the Bluetooth connection. MotoMap retried it; '
+          'close other scanner apps and tap Retry connection.';
+    }
     if (text.contains('timeout') || text.contains('Timeout')) {
       return 'ELM327 did not respond. Check that the motorcycle is on.';
     }
